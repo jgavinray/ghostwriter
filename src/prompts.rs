@@ -33,7 +33,7 @@ A. Staging instead of stating
 B. Rhythm by rule
 - Forced triads: ideas arrive in threes to sound complete ("innovation, inspiration, and insights"), or three parallel examples plus a lesson. Keep the number of items the meaning needs.
 - Repeated sentence openings: several sentences in a row starting with the same subject. Merge them or change the subject; deliberate rhythm ("She came. She saw. She conquered.") stays.
-- Dashes as the universal connector (weak): beyond the one-pair cap, em dashes, spaced dashes, or "--" joining clauses. Use a period, comma, colon, or parentheses. Leave dashes inside code blocks, inline code, commands, paths, and URLs alone. A writing sample that uses dashes overrides this rule; match its rate.
+- Dashes as the universal connector (weak): beyond the one-pair cap, em dashes, spaced dashes, or "--" joining clauses. Use a period, comma, colon, or parentheses. Leave dashes inside code blocks, inline code, commands, paths, and URLs alone.
 - Stacked qualifiers (weak): "could potentially", "might arguably", "it may be argued". Keep only qualifiers the text supports; ordinary hedges (perhaps, tends to) are human habits.
 - Hyphenated pairs everywhere (weak): "cross-functional", "data-driven", "well-known", "real-time" in every position. Keep the hyphen before a noun when grammar needs it; drop it after the noun.
 - Passive voice and missing subjects (weak): "No configuration file needed." Name the actor when that clarifies.
@@ -110,7 +110,7 @@ pub static REWRITE_GUIDE: LazyLock<String> = LazyLock::new(|| {
 Workflow — work these passes silently, then return only the final rewrite:
 1. Mark every AI-writing pattern below, strongest first, at sentence and paragraph scale (a contrast split across two sentences, three parallel examples, or a closer after every section is the same tell, larger).
 2. Draft the rewrite. Treat the text as material, not a fixed structure: merge, split, or reorder paragraphs; shorten what adds nothing; keep every claim.
-3. Check the draft: nothing added and nothing dropped (rankings, dates, numbers, and simultaneity claims die first), then hunt the five survivors — a not-X-but-Y contrast, a one-line closer, a dash (unless a voice sample supplies them), a triad, a bold label.
+3. Check the draft: nothing added and nothing dropped (rankings, dates, numbers, and simultaneity claims die first), then hunt the five survivors — a not-X-but-Y contrast, a one-line closer, a dash, a triad, a bold label.
 4. State each point naturally instead of patching flagged phrases one at a time; vary sentence length.
 
 Preserve exactly: every fact, name, number, date, quote, citation, and ranking in the input; the input's language; code blocks, inline code, commands, paths, URLs, and data. Change prose only, and add nothing the input does not contain.
@@ -119,11 +119,11 @@ Register follows the kind of text: reference, technical, legal, and factual pros
 
 Mechanics: one idea per sentence; Oxford comma in every series of three or more; em dashes at most one pair per document, never as a substitute for a comma or period; headings in sentence case; no softeners (simply, just, easily, obviously, basically, actually, very, really, quite); cut every filler phrase and empty intensifier.
 
+Voice sample: when the task provides a writing sample, it defines the author's voice and overrides the rules above where they conflict — match its sentence length, word choice, punctuation, openings, and dash rate, and keep its quirks. An opinion or reaction may be added where the voice calls for one; a factual claim may not.
+
 Keep the details that carry a human voice unless they hurt the meaning: specific unusual details, mixed feelings, dated references, genuine asides and self-corrections. Leave a watched phrase alone inside a quotation, a title, or a proper name.
 
 {tells}
-
-Voice sample: when the task provides a writing sample, it defines the author's voice and overrides every rule above where they conflict — match its sentence length, word choice, punctuation, openings, and dash rate, and keep its quirks. An opinion or reaction may be added where the voice calls for one; a factual claim may not.
 
 Return only the rewritten text. No commentary, no before/after labels."#
     )

@@ -289,9 +289,9 @@ impl WritingServer {
             .await)
     }
 
-    /// Rewrite text so it reads like a careful human wrote it: removes AI-writing patterns (staged contrasts, one-line closers, forced triads, stock AI vocabulary, inflated significance, formatting-by-rule, chatbot residue — Wikipedia's "Signs of AI writing" list), enforces formal mechanics (Oxford comma, restrained em dashes, sentence-case headings), and preserves every fact — prose changes only; code blocks, commands, paths, and URLs stay intact. Optional `voice_sample` (the writer's own prose) makes the rewrite match that voice where it conflicts with the standard rules. Provide `text` or `path` — exactly one. Run this on documentation drafts (including your own) before shipping them.
+    /// Rewrite text so it reads like a careful human wrote it: removes AI-writing patterns (staged contrasts, one-line closers, forced triads, stock AI vocabulary, inflated significance, formatting-by-rule, chatbot residue — Wikipedia's "Signs of AI writing" list), enforces formal mechanics (Oxford comma, restrained em dashes, sentence-case headings), and preserves every fact — prose changes only; code blocks, commands, paths, and URLs stay intact. Optional `voice_sample` (the writer's own prose) matches the rewrite to that voice's register and word choice; em-dash rate preservation is best-effort on the current model, and critique_prose is the authoritative dash-rate judge against the sample. Provide `text` or `path` — exactly one. Run this on documentation drafts (including your own) before shipping them.
     #[tool(
-        description = "Rewrite text so it reads like a careful human wrote it: removes AI-writing patterns (staged contrasts, one-line closers, forced triads, stock AI vocabulary, inflated significance, formatting-by-rule, chatbot residue — Wikipedia's \"Signs of AI writing\" list), enforces formal mechanics (Oxford comma, restrained em dashes, sentence-case headings), and preserves every fact — prose changes only; code blocks, commands, paths, and URLs stay intact. Optional `voice_sample` (the writer's own prose) makes the rewrite match that voice where it conflicts with the standard rules. Provide `text` or `path` — exactly one. Run this on documentation drafts (including your own) before shipping them."
+        description = "Rewrite text so it reads like a careful human wrote it: removes AI-writing patterns (staged contrasts, one-line closers, forced triads, stock AI vocabulary, inflated significance, formatting-by-rule, chatbot residue — Wikipedia's \"Signs of AI writing\" list), enforces formal mechanics (Oxford comma, restrained em dashes, sentence-case headings), and preserves every fact — prose changes only; code blocks, commands, paths, and URLs stay intact. Optional `voice_sample` (the writer's own prose) matches the rewrite to that voice's register and word choice; em-dash rate preservation is best-effort on the current model, and critique_prose is the authoritative dash-rate judge against the sample. Provide `text` or `path` — exactly one. Run this on documentation drafts (including your own) before shipping them."
     )]
     async fn rewrite_prose(
         &self,
@@ -310,6 +310,26 @@ impl WritingServer {
         {
             head.push_str(&format!("\nGoal: {goal}"));
         }
+        let voice = args
+            .voice_sample
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if voice.is_some() {
+            // Empirically tuned head pair (kaibo consult job-1 + live A/B,
+            // 2026-09-24): Goal + Voice lines in this exact wording are the
+            // only configuration observed to preserve the sample's dash
+            // rate; later guide-side exception variants measured 0/10.
+            // Re-verify against any hemmingway-1 model update; degrade mode
+            // is dashes normalized away, which critique_prose still judges
+            // correctly against the sample.
+            head.push_str(
+                "\nGoal: Keep the em dashes; they are part of the author's voice and the writing sample uses them.",
+            );
+            head.push_str(
+                "\nVoice: the writing sample below defines the author's voice; match it and let it override the standard rules where they conflict.",
+            );
+        }
         if let Some(audience) = args
             .audience
             .as_deref()
@@ -317,16 +337,6 @@ impl WritingServer {
             .filter(|s| !s.is_empty())
         {
             head.push_str(&format!("\nAudience: {audience}"));
-        }
-        let voice = args
-            .voice_sample
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        if voice.is_some() {
-            head.push_str(
-                "\nVoice: the writing sample defines the author's voice; rewrite in that voice and keep every em dash from the input.",
-            );
         }
         // The sample goes before the text: the model reads the voice it must
         // match first, mirroring the humanizer skill's sample-then-text order.
@@ -543,7 +553,7 @@ impl ServerHandler for WritingServer {
                  - Draft with document_code, or compose from raw material, then pass the draft through critique_prose (and rewrite_prose for the final pass) before shipping it.\n\
                  - rewrite_prose removes the AI-writing patterns from Wikipedia's \"Signs of AI writing\" (staged contrasts, one-line closers, forced triads, stock vocabulary, inflated significance, formatting-by-rule, chatbot residue) and preserves every fact: prose changes only, code blocks, commands, paths, and URLs stay intact, so it is safe on markdown files.\n\
                  - To humanize with visible checks: rewrite_prose, then critique_prose on the result, then rewrite_prose once more with the critique findings as `goal`.\n\
-                 - To match a writer's voice, pass their prose as `voice_sample` to rewrite_prose (and critique_prose when reviewing): the sample overrides the standard rules where they conflict, including dash rate.\n\
+                 - To match a writer's voice, pass their prose as `voice_sample` to rewrite_prose (and critique_prose when reviewing): the sample steers register and word choice; em-dash rate preservation in rewrite is best-effort, and critique_prose judges dash rate against the sample.\n\
                  - critique_prose returns exactly CLEAN when there is nothing to fix.\n\
                  - When the writing tools fail, call model_health first; it names the endpoint and the served model ids.\n",
             )

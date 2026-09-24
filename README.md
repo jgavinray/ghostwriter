@@ -30,7 +30,7 @@ ghostwriter is that model's tool surface. It exists to solve three problems:
 | Tool | Input | Output |
 | --- | --- | --- |
 | `document_code` | Source code (inline or `path`), a document kind, optional audience and notes | A README, API reference, overview, CLI or config doc, changelog entry, or doc-comment |
-| `rewrite_prose` | Prose (inline or `path`), optional goal, audience, and `voice_sample` | The same text with AI-writing patterns, filler, puff words, softeners, and passive voice removed; facts, code blocks, commands, and paths preserved. With `voice_sample`, the rewrite matches the writer's own voice where it conflicts with the standard rules |
+| `rewrite_prose` | Prose (inline or `path`), optional goal, audience, and `voice_sample` | The same text with AI-writing patterns, filler, puff words, softeners, and passive voice removed; facts, code blocks, commands, and paths preserved. With `voice_sample`, the rewrite matches the writer's register and word choice (em-dash rate is best-effort; `critique_prose` judges it against the sample) |
 | `critique_prose` | Prose (inline or `path`), optional reference `source` and `voice_sample` | A numbered fault list (AI-writing patterns plus house faults), or exactly `CLEAN` |
 | `compose` | Raw material (inline or `path`), a kind, optional date, author, length, sections, previous | A standup, PRD, one-pager, announcement, summary, release notes, postmortem, weekly status, or meeting notes |
 | `model_health` | Nothing | Whether the writing-model server is reachable and serving the configured model |
