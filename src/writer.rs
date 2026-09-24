@@ -325,7 +325,7 @@ impl WritingServer {
             .filter(|s| !s.is_empty());
         if voice.is_some() {
             head.push_str(
-                "\nVoice: the writing sample below defines the author's voice; match it and let it override the standard rules where they conflict.",
+                "\nVoice: the writing sample defines the author's voice; rewrite in that voice and keep every em dash from the input.",
             );
         }
         // The sample goes before the text: the model reads the voice it must
