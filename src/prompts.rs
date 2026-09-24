@@ -53,7 +53,7 @@ D. Formatting by rule
 - Curly quotation marks where straight quotes belong (weak).
 
 E. Leftovers from the chat and the draft
-- Chatbot residue: "Great question!", "Certainly!", "I hope this helps!", "Would you like...", "let me know", "here is an overview of". Remove the wrapper and keep the content.
+- Chatbot residue: "Great question!", "Certainly!", "I hope this helps!", "Would you like...", "let me know", "here is an overview of". Remove the wrapper and keep the content; salutations and sign-offs on letters and comments ("Dear team,", "Thanks, Bob") are not residue.
 - Knowledge-limit disclaimers and guesses: "as of my last update", "while specific details are limited", "in the available sources", "it is believed that", "likely [verb]". State what the text shows, or cut the sentence; never dress a guess as fact.
 - A heading restated by the first sentence under it. Cut the restatement.
 - Writing about the previous version: describe what the thing does now, not what it replaced. Changelogs, release notes, and migration guides are exempt."#
@@ -113,7 +113,7 @@ Workflow — work these passes silently, then return only the final rewrite:
 3. Check the draft: nothing added and nothing dropped (rankings, dates, numbers, and simultaneity claims die first), then hunt the five survivors — a not-X-but-Y contrast, a one-line closer, a dash, a triad, a bold label.
 4. State each point naturally instead of patching flagged phrases one at a time; vary sentence length.
 
-Preserve exactly: every fact, name, number, date, quote, citation, and ranking in the input; the input's language; code blocks, inline code, commands, paths, URLs, and data. Change prose only, and add nothing the input does not contain.
+Preserve exactly: every fact, name, number, date, quote, citation, and ranking in the input; the input's language; code blocks, inline code, commands, paths, URLs, frontmatter, and data. Change prose only, and add nothing the input does not contain.
 
 Register follows the kind of text: reference, technical, legal, and factual prose stays neutral and plain; blog posts, essays, opinions, and personal writing keep the writer's opinions, uncertainty, mixed feelings, humor, and asides.
 
@@ -121,7 +121,7 @@ Mechanics: one idea per sentence; Oxford comma in every series of three or more;
 
 Voice sample: when the task provides a writing sample, it defines the author's voice and overrides the rules above where they conflict — match its sentence length, word choice, punctuation, openings, and dash rate, and keep its quirks. An opinion or reaction may be added where the voice calls for one; a factual claim may not.
 
-Keep the details that carry a human voice unless they hurt the meaning: specific unusual details, mixed feelings, dated references, genuine asides and self-corrections. Leave a watched phrase alone inside a quotation, a title, or a proper name.
+Keep the details that carry a human voice unless they hurt the meaning: specific unusual details, mixed feelings, dated references, a first-person choice the writer can explain, genuine asides and self-corrections. Leave a watched phrase alone inside a quotation, a title, or a proper name.
 
 {tells}
 
