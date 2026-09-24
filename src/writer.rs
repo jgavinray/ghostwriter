@@ -108,6 +108,9 @@ pub struct RewriteProseArgs {
     /// Who reads the text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<String>,
+    /// A short sample of the writer's own prose (two or three paragraphs). The rewrite matches that voice — sentence length, word choice, punctuation, dash rate — and the sample overrides the standard rules where they conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_sample: Option<String>,
     /// Completion budget in tokens, 1..32768. Defaults to 4096.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -127,6 +130,9 @@ pub struct CritiqueProseArgs {
     /// Reference source the text's factual claims must be checked against. Optional; without it the review can only judge internal vagueness, not correctness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// A short sample of the author's own prose. Patterns the sample itself exhibits (dash rate, fragments, contractions) are the author's voice, not faults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_sample: Option<String>,
     /// Completion budget in tokens, 1..32768. Defaults to 4096.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -275,7 +281,7 @@ impl WritingServer {
         }
         Ok(self
             .render(
-                prompts::STYLE_GUIDE,
+                prompts::STYLE_GUIDE.as_str(),
                 &user_prompt(&head, "Source", &body),
                 self.clamp_tokens(args.max_tokens, 8192),
                 self.temperature(args.temperature),
@@ -283,9 +289,9 @@ impl WritingServer {
             .await)
     }
 
-    /// Rewrite text to a professional standard: filler, puff words, softeners, passive voice, vague claims, and multi-idea sentences are removed; formal mechanics (Oxford comma, restrained em dashes, sentence-case headings) are enforced. Facts and format are preserved; nothing is added. Provide `text` or `path` — exactly one. Run this on documentation drafts (including your own) before shipping them.
+    /// Rewrite text so it reads like a careful human wrote it: removes AI-writing patterns (staged contrasts, one-line closers, forced triads, stock AI vocabulary, inflated significance, formatting-by-rule, chatbot residue — Wikipedia's "Signs of AI writing" list), enforces formal mechanics (Oxford comma, restrained em dashes, sentence-case headings), and preserves every fact — prose changes only; code blocks, commands, paths, and URLs stay intact. Optional `voice_sample` (the writer's own prose) makes the rewrite match that voice where it conflicts with the standard rules. Provide `text` or `path` — exactly one. Run this on documentation drafts (including your own) before shipping them.
     #[tool(
-        description = "Rewrite text to a professional standard: filler, puff words, softeners, passive voice, vague claims, and multi-idea sentences are removed; formal mechanics (Oxford comma, restrained em dashes, sentence-case headings) are enforced. Facts and format are preserved; nothing is added. Provide `text` or `path` — exactly one. Run this on documentation drafts (including your own) before shipping them."
+        description = "Rewrite text so it reads like a careful human wrote it: removes AI-writing patterns (staged contrasts, one-line closers, forced triads, stock AI vocabulary, inflated significance, formatting-by-rule, chatbot residue — Wikipedia's \"Signs of AI writing\" list), enforces formal mechanics (Oxford comma, restrained em dashes, sentence-case headings), and preserves every fact — prose changes only; code blocks, commands, paths, and URLs stay intact. Optional `voice_sample` (the writer's own prose) makes the rewrite match that voice where it conflicts with the standard rules. Provide `text` or `path` — exactly one. Run this on documentation drafts (including your own) before shipping them."
     )]
     async fn rewrite_prose(
         &self,
@@ -312,19 +318,37 @@ impl WritingServer {
         {
             head.push_str(&format!("\nAudience: {audience}"));
         }
+        let voice = args
+            .voice_sample
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if voice.is_some() {
+            head.push_str(
+                "\nVoice: the writing sample below defines the author's voice; match it and let it override the standard rules where they conflict.",
+            );
+        }
+        // The sample goes before the text: the model reads the voice it must
+        // match first, mirroring the humanizer skill's sample-then-text order.
+        let user = match voice {
+            Some(sample) => format!(
+                "{head}\n\nWriting sample (match this voice):\n````text\n{sample}\n````\n\nText to rewrite:\n````text\n{body}\n````"
+            ),
+            None => user_prompt(&head, "Text to rewrite", &body),
+        };
         Ok(self
             .render(
-                prompts::REWRITE_GUIDE,
-                &user_prompt(&head, "Text to rewrite", &body),
+                prompts::REWRITE_GUIDE.as_str(),
+                &user,
                 self.clamp_tokens(args.max_tokens, 4096),
                 self.temperature(args.temperature),
             )
             .await)
     }
 
-    /// Editorial review of text WITHOUT rewriting it: a numbered list of concrete faults (filler, puff words, passive voice, vague claims, run-on ideas, missing Oxford comma, em-dash overuse, invented specifics), each quoting the phrase and proposing the local fix. Optionally pass `source` to have every factual claim verified against it. Returns exactly CLEAN when there is nothing to fix. Provide `text` or `path` — exactly one.
+    /// Editorial review of text WITHOUT rewriting it: a numbered list of concrete faults — AI-writing patterns (staged contrasts, one-line closers, forced triads, stock vocabulary, formatting-by-rule) plus filler, puff words, passive voice, vague claims, run-on ideas, missing Oxford comma, em-dash overuse, invented specifics — each quoting the phrase and proposing the local fix. Optionally pass `source` (reference text) to have every factual claim verified against it, and `voice_sample` so patterns the sample itself exhibits are not flagged. Returns exactly CLEAN when there is nothing to fix. Provide `text` or `path` — exactly one.
     #[tool(
-        description = "Editorial review of text WITHOUT rewriting it: a numbered list of concrete faults (filler, puff words, passive voice, vague claims, run-on ideas, missing Oxford comma, em-dash overuse, invented specifics), each quoting the phrase and proposing the local fix. Optionally pass `source` (reference text) to have every factual claim in the reviewed text verified against it. Returns exactly CLEAN when there is nothing to fix. Provide `text` or `path` — exactly one."
+        description = "Editorial review of text WITHOUT rewriting it: a numbered list of concrete faults — AI-writing patterns (staged contrasts, one-line closers, forced triads, stock vocabulary, formatting-by-rule) plus filler, puff words, passive voice, vague claims, run-on ideas, missing Oxford comma, em-dash overuse, invented specifics — each quoting the phrase and proposing the local fix. Optionally pass `source` (reference text) to have every factual claim in the reviewed text verified against it, and `voice_sample` so patterns the sample itself exhibits are not flagged. Returns exactly CLEAN when there is nothing to fix. Provide `text` or `path` — exactly one."
     )]
     async fn critique_prose(
         &self,
@@ -335,30 +359,39 @@ impl WritingServer {
             Err(e) => return Ok(error_result(e)),
         };
         let mut head = String::from("Review the text below.");
-        if let Some(source) = args
+        let source = args
             .source
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
+            .filter(|s| !s.is_empty());
+        if source.is_some() {
             head.push_str(
                 " The text makes factual claims; verify every one against the reference source.",
             );
-            return Ok(self
-                .render(
-                    prompts::CRITIQUE_GUIDE,
-                    &format!(
-                        "{head}\n\nText to review:\n````text\n{body}\n````\n\nReference source:\n````text\n{source}\n````"
-                    ),
-                    self.clamp_tokens(args.max_tokens, 4096),
-                    self.temperature(args.temperature),
-                )
-                .await);
+        }
+        let voice = args
+            .voice_sample
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if voice.is_some() {
+            head.push_str(
+                " The writing sample defines the author's voice; do not flag a pattern the sample itself exhibits.",
+            );
+        }
+        let mut user = format!("{head}\n\nText to review:\n````text\n{body}\n````");
+        if let Some(sample) = voice {
+            user.push_str(&format!(
+                "\n\nWriting sample (defines the author's voice):\n````text\n{sample}\n````"
+            ));
+        }
+        if let Some(source) = source {
+            user.push_str(&format!("\n\nReference source:\n````text\n{source}\n````"));
         }
         Ok(self
             .render(
-                prompts::CRITIQUE_GUIDE,
-                &user_prompt(&head, "Text to review", &body),
+                prompts::CRITIQUE_GUIDE.as_str(),
+                &user,
                 self.clamp_tokens(args.max_tokens, 4096),
                 self.temperature(args.temperature),
             )
@@ -461,7 +494,7 @@ impl WritingServer {
         };
         Ok(self
             .render(
-                prompts::COMPOSE_GUIDE,
+                prompts::COMPOSE_GUIDE.as_str(),
                 &user,
                 self.clamp_tokens(args.max_tokens, 8192),
                 self.temperature(args.temperature),
@@ -506,8 +539,11 @@ impl ServerHandler for WritingServer {
             .with_server_info(Implementation::new("ghostwriter", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "## Writing protocol (MCP: ghostwriter)\n\
-                 - Human-facing prose is finalized by the hemmingway-1 model through these tools: document_code drafts docs from source, compose writes standups, PRDs, one-pagers, announcements, summaries, release notes, postmortems, weekly statuses, and meeting notes from raw material, rewrite_prose de-slops existing text, critique_prose reports findings without rewriting (optionally against a reference source).\n\
+                 - Human-facing prose is finalized by the hemmingway-1 model through these tools: document_code drafts docs from source, compose writes standups, PRDs, one-pagers, announcements, summaries, release notes, postmortems, weekly statuses, and meeting notes from raw material, rewrite_prose rewrites existing text so it reads like a human wrote it, critique_prose reports findings without rewriting (optionally against a reference source).\n\
                  - Draft with document_code, or compose from raw material, then pass the draft through critique_prose (and rewrite_prose for the final pass) before shipping it.\n\
+                 - rewrite_prose removes the AI-writing patterns from Wikipedia's \"Signs of AI writing\" (staged contrasts, one-line closers, forced triads, stock vocabulary, inflated significance, formatting-by-rule, chatbot residue) and preserves every fact: prose changes only, code blocks, commands, paths, and URLs stay intact, so it is safe on markdown files.\n\
+                 - To humanize with visible checks: rewrite_prose, then critique_prose on the result, then rewrite_prose once more with the critique findings as `goal`.\n\
+                 - To match a writer's voice, pass their prose as `voice_sample` to rewrite_prose (and critique_prose when reviewing): the sample overrides the standard rules where they conflict, including dash rate.\n\
                  - critique_prose returns exactly CLEAN when there is nothing to fix.\n\
                  - When the writing tools fail, call model_health first; it names the endpoint and the served model ids.\n",
             )
@@ -546,6 +582,7 @@ mod tests {
                 path: None,
                 goal: None,
                 audience: None,
+                voice_sample: None,
                 max_tokens: None,
                 temperature: None,
             }))

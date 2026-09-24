@@ -4,7 +4,9 @@ A single-binary MCP server that produces written documentation through a locally
 served writing model. Five tools — `document_code`, `rewrite_prose`,
 `critique_prose`, `compose`, and `model_health` — carry the whole surface, and
 every one of them enforces one house style: formal register, Oxford comma,
-active voice, no filler, no puff words, no invented facts.
+active voice, no filler, no puff words, no invented facts — and the rewrite
+and review surfaces remove the AI-writing patterns from Wikipedia's
+"Signs of AI writing" list (the pattern set behind the blader/humanizer skill).
 
 ## Why it exists
 
@@ -28,8 +30,8 @@ ghostwriter is that model's tool surface. It exists to solve three problems:
 | Tool | Input | Output |
 | --- | --- | --- |
 | `document_code` | Source code (inline or `path`), a document kind, optional audience and notes | A README, API reference, overview, CLI or config doc, changelog entry, or doc-comment |
-| `rewrite_prose` | Prose (inline or `path`), optional goal and audience | The same text with filler, puff words, softeners, and passive voice removed |
-| `critique_prose` | Prose (inline or `path`), optional reference `source` | A numbered fault list, or exactly `CLEAN` |
+| `rewrite_prose` | Prose (inline or `path`), optional goal, audience, and `voice_sample` | The same text with AI-writing patterns, filler, puff words, softeners, and passive voice removed; facts, code blocks, commands, and paths preserved. With `voice_sample`, the rewrite matches the writer's own voice where it conflicts with the standard rules |
+| `critique_prose` | Prose (inline or `path`), optional reference `source` and `voice_sample` | A numbered fault list (AI-writing patterns plus house faults), or exactly `CLEAN` |
 | `compose` | Raw material (inline or `path`), a kind, optional date, author, length, sections, previous | A standup, PRD, one-pager, announcement, summary, release notes, postmortem, weekly status, or meeting notes |
 | `model_health` | Nothing | Whether the writing-model server is reachable and serving the configured model |
 
