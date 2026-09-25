@@ -16,9 +16,14 @@ cross-session state lives in `~/exomemory/`, never here.
 - `src/config.rs` — layered config: defaults < `~/.config/ghostwriter/config.toml`
   (same path on macOS and Linux) < `GHOSTWRITER_*` environment variables.
   `build()` is the single validation point; `FileConfig` refuses unknown keys.
-- `src/client.rs` — OpenAI-compatible chat client. `AttemptError` classifies
-  failures: transport/timeout/429/5xx/empty are retried once, everything else
-  (other 4xx, unparseable 2xx) fails immediately.
+- `src/client.rs` — OpenAI-compatible chat client; completions stream as
+  SSE (`stream: true`). `SseTail` accumulates deltas and refuses a stream
+  that ends without `[DONE]`. `AttemptError` classifies failures: connection
+  faults before any response, 429, 5xx, and empty completions are retried
+  once; timeouts, idle stalls (silence past `idle_timeout` once the stream
+  has emitted its first token), other 4xx, broken chunk JSON, and
+  mid-generation stream death fail immediately — resending work the server
+  already accepted only doubles the load.
 - `src/writer.rs` — the MCP surface. Five `#[tool]` handlers, argument structs,
   truncation markers, `error_result`.
 - `src/prompts.rs` — the style guides. This is the product: the guides are why

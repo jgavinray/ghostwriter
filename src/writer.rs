@@ -570,6 +570,7 @@ mod tests {
             model: "test-model".into(),
             temperature: 0.3,
             timeout: std::time::Duration::from_secs(1),
+            idle_timeout: std::time::Duration::from_millis(500),
         })
         .unwrap()
     }

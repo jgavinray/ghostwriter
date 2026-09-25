@@ -58,7 +58,8 @@ Configuration resolves once at startup, in layers from lowest to highest:
 2. The config file: `~/.config/ghostwriter/config.toml` — the same path on
    macOS and Linux — or the file named by `--config <path>`.
 3. Environment variables: `GHOSTWRITER_BASE_URL`, `GHOSTWRITER_MODEL`,
-   `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`.
+   `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`,
+   `GHOSTWRITER_IDLE_TIMEOUT_SECS`.
 
 A missing default config file is fine; the defaults stand. A `--config` path
 that does not exist is a startup error. Unknown keys in the config file are a
@@ -69,8 +70,18 @@ startup error, so a typo never silently reverts a setting to its default.
 base_url = "http://hyper03:8002/v1"
 model = "hemmingway-1"
 temperature = 0.3
-timeout_secs = 300
+timeout_secs = 900
+idle_timeout_secs = 60
 ```
+
+`timeout_secs` bounds one whole generation attempt, queueing included — a
+busy engine holds a queued request in silence until its first token.
+`idle_timeout_secs` kills a stream only after it began emitting and then
+went silent. A timed-out or stalled request is never resent — the server
+is already working on it. Resends cover only
+connection failures, 429, 5xx, and empty completions. The MCP client's
+per-server timeout must exceed `timeout_secs` or the client reports a
+transport timeout before the server can return a readable error.
 
 The built-in defaults point at the fleet's writing-model server
 (`http://hyper03:8002/v1`, model `hemmingway-1`); an install anywhere else
@@ -82,18 +93,21 @@ Verify resolution without starting the server:
 target/release/ghostwriter --self-check
 ```
 
-## Registering with an MCP client
-
-Point the client at the binary. No environment block is required once the
-config file exists:
-
 ```json
 {
   "mcpServers": {
     "ghostwriter": {
       "command": "/usr/local/bin/ghostwriter",
-      "timeout": 600000
+      "timeout": 1200000
     }
+  }
+}
+```
+
+The client `timeout` must be larger than the server's `timeout_secs`
+(900 s default) plus startup headroom, so a slow generation reports as a
+readable `isError` from ghostwriter rather than a bare transport timeout
+from the client.
   }
 }
 ```

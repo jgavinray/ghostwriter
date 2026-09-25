@@ -8,8 +8,9 @@
 //! `~/.config/ghostwriter/config.toml` on macOS and Linux alike), then by
 //! `GHOSTWRITER_*` environment variables (see `config::load`). `--self-check`
 //! resolves the configuration, prints ONE JSON line
-//! `{base_url, model, temperature, timeout_secs}` to stdout, and exits 0 —
-//! configuration that cannot resolve is never served with.
+//! `{base_url, model, temperature, timeout_secs, idle_timeout_secs}` to
+//! stdout, and exits 0 — configuration that cannot resolve is never served
+//! with.
 
 use std::path::PathBuf;
 use std::process::exit;
@@ -55,11 +56,12 @@ async fn main() {
     };
     if self_check {
         println!(
-            "{{\"base_url\":{},\"model\":{},\"temperature\":{},\"timeout_secs\":{}}}",
+            "{{\"base_url\":{},\"model\":{},\"temperature\":{},\"timeout_secs\":{},\"idle_timeout_secs\":{}}}",
             serde_json::Value::from(config.base_url),
             serde_json::Value::from(config.model),
             config.temperature,
             config.timeout.as_secs(),
+            config.idle_timeout.as_secs(),
         );
         exit(0);
     }
