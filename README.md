@@ -1,12 +1,14 @@
 # ghostwriter
 
-A single-binary MCP server that produces written documentation through a locally
-served writing model. Five tools — `document_code`, `rewrite_prose`,
-`critique_prose`, `compose`, and `model_health` — carry the whole surface, and
-every one of them enforces one house style: formal register, Oxford comma,
-active voice, no filler, no puff words, no invented facts — and the rewrite
-and review surfaces remove the AI-writing patterns from Wikipedia's
-"Signs of AI writing" list (the pattern set behind the blader/humanizer skill).
+A single-binary MCP server that produces written documentation through a
+locally served writing model. Six tools — `document_code`, `rewrite_prose`,
+`critique_prose`, `compose`, `ste_check`, and `model_health` — carry the
+whole surface, and every model-backed one of them enforces one house style:
+formal register, Oxford comma, active voice, no filler, no puff words, no
+invented facts — and the rewrite and review surfaces remove the AI-writing
+patterns from Wikipedia's "Signs of AI writing" list (the pattern set behind
+the blader/humanizer skill). Any model-backed tool can additionally compose
+to ASD-STE100 Simplified Technical English with `ste: true`.
 
 ## Why it exists
 
@@ -30,14 +32,29 @@ ghostwriter is that model's tool surface. It exists to solve three problems:
 | Tool | Input | Output |
 | --- | --- | --- |
 | `document_code` | Source code (inline or `path`), a document kind, optional audience and notes | A README, API reference, overview, CLI or config doc, changelog entry, or doc-comment |
-| `rewrite_prose` | Prose (inline or `path`), optional goal, audience, and `voice_sample` | The same text with AI-writing patterns, filler, puff words, softeners, and passive voice removed; facts, code blocks, commands, and paths preserved. With `voice_sample`, the rewrite matches the writer's register and word choice (em-dash rate is best-effort; `critique_prose` judges it against the sample) |
-| `critique_prose` | Prose (inline or `path`), optional reference `source` and `voice_sample` | A numbered fault list (AI-writing patterns plus house faults), or exactly `CLEAN` |
-| `compose` | Raw material (inline or `path`), a kind, optional date, author, length, sections, previous | A standup, PRD, one-pager, announcement, summary, release notes, postmortem, weekly status, or meeting notes |
+| `rewrite_prose` | Prose (inline or `path`), optional goal, audience, `voice_sample`, and `ste` | The same text with AI-writing patterns, filler, puff words, softeners, and passive voice removed; facts, code blocks, commands, and paths preserved. With `voice_sample`, the rewrite matches the writer's register and word choice (em-dash rate is best-effort; `critique_prose` judges it against the sample). With `ste: true`, also composes to ASD-STE100 (approved general vocabulary, one idea per sentence, no semicolons or contractions) |
+| `critique_prose` | Prose (inline or `path`), optional reference `source`, `voice_sample`, and `ste` | A numbered fault list (AI-writing patterns plus house faults, plus STE faults when `ste: true`), or exactly `CLEAN` |
+| `compose` | Raw material (inline or `path`), a kind, optional date, author, length, sections, previous, and `ste` | A standup, PRD, one-pager, announcement, summary, release notes, postmortem, weekly status, or meeting notes; `ste: true` composes it in ASD-STE100 |
+| `ste_check` | Prose (inline or `path`) | Deterministic ASD-STE100 findings with no model call: JSON `{clean, dictionary, findings:[{line, quote, rule, fix}]}` — unapproved general vocabulary with its approved replacement (against the embedded STE100 Issue 8 dictionary), semicolons, contractions, Latin abbreviations, and sentences over the STE caps (20 words for an instruction, 25 for description). Code blocks, inline code, commands, paths, and URLs are exempt. Findings are mechanical: an empty list does not judge style |
 | `model_health` | Nothing | Whether the writing-model server is reachable and serving the configured model |
 
 Tool failures travel as `isError` results the calling agent can read, never as
 protocol errors. Truncated output carries a visible marker so half a document
 is never mistaken for a whole one.
+
+## Simplified Technical English (ASD-STE100)
+
+Pass `ste: true` to `document_code`, `rewrite_prose`, `critique_prose`, or
+`compose` and the system prompt gains the ASD-STE100 writing rules on top of
+the house style: approved general vocabulary from the controlled dictionary,
+command-form instructions, one idea per sentence, no semicolons, no
+contractions, no Latin abbreviations, approved tenses. `ste_check` runs the
+mechanical half without a model call — dictionary lookups plus the length,
+semicolon, contraction, and Latin checks — so an agent can verify a document
+before or after the model pass. The rule text is a summary of the
+specification and the dictionary carries the word-level replacement data
+(word, part of speech, approved replacement); the ASD manual itself is not
+duplicated in this repository.
 
 ## Building
 
@@ -93,6 +110,8 @@ Verify resolution without starting the server:
 target/release/ghostwriter --self-check
 ```
 
+Register the server with an MCP client:
+
 ```json
 {
   "mcpServers": {
@@ -108,9 +127,6 @@ The client `timeout` must be larger than the server's `timeout_secs`
 (900 s default) plus startup headroom, so a slow generation reports as a
 readable `isError` from ghostwriter rather than a bare transport timeout
 from the client.
-  }
-}
-```
 
 On a Linux server, a systemd unit works the same way:
 `ExecStart=/usr/local/bin/ghostwriter --config /etc/ghostwriter/config.toml`.

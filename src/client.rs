@@ -75,6 +75,11 @@ impl Client {
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": true,
+            // vLLM-specific: served models with a reasoning parser (qwen38)
+            // otherwise bill thinking tokens against max_tokens, which can
+            // leave message content null and surface as "empty completion".
+            // Other vLLM templates ignore an unknown chat_template kwarg.
+            "chat_template_kwargs": {"enable_thinking": false},
         });
 
         let mut last_err = String::new();

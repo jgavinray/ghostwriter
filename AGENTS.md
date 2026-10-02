@@ -2,7 +2,7 @@
 
 ## What this is
 
-A single-binary MCP server (rmcp 3.4, tokio, reqwest) exposing five writing
+A single-binary MCP server (rmcp 3.4, tokio, reqwest) exposing six writing
 tools over stdio, backed by the locally served `hemmingway-1` model. Coding
 agents call it to finalize human-facing prose. The repository lives at
 `git@github.com:jgavinray/ghostwriter.git` (remote `origin`, branch `main`);
@@ -24,10 +24,19 @@ cross-session state lives in `~/exomemory/`, never here.
   has emitted its first token), other 4xx, broken chunk JSON, and
   mid-generation stream death fail immediately — resending work the server
   already accepted only doubles the load.
-- `src/writer.rs` — the MCP surface. Five `#[tool]` handlers, argument structs,
+- `src/writer.rs` — the MCP surface. Six `#[tool]` handlers, argument structs,
   truncation markers, `error_result`.
 - `src/prompts.rs` — the style guides. This is the product: the guides are why
   output is not generic LLM prose. Treat edits here as behavior changes.
+- `src/ste.rs` — the ASD-STE100 integration. `STE_GUIDE` (a summary of the
+  specification's writing rules, appended to the system prompt when a caller
+  passes `ste: true`) and the deterministic `check()` behind `ste_check`.
+  The approved-general-vocabulary dictionary ships as
+  `assets/ste100-unapproved.tsv` (`word<TAB>pos<TAB>APPROVED REPLACEMENT`,
+  `#` comments), embedded with `include_str!` at compile time. It is
+  byte-reproducible: `pdftotext -layout` the ASD-STE100 Issue 8 PDF, then
+  `python3 assets/parse.py <pdftotext-output.txt>
+  assets/ste100-unapproved.tsv` (provenance note in the script docstring).
 
 ## Invariants (do not break)
 
@@ -47,6 +56,11 @@ cross-session state lives in `~/exomemory/`, never here.
   server.
 - "hemmingway" (two m's, single h) is the served model id — intentional, do
   not "fix" the spelling.
+- `ste_check` performs no network call: its result is a pure function of the
+  embedded dictionary, so tests can pin exact findings. The dictionary is
+  word-level replacement data (word, part of speech, approved replacement);
+  the ASD manual's own text does not enter the repository — `STE_GUIDE` is a
+  summary, not an excerpt.
 
 ## Config contract
 
@@ -62,7 +76,7 @@ cross-session state lives in `~/exomemory/`, never here.
 ## Verify before claiming done
 
 ```sh
-cargo test                    # 16 tests, all must pass
+cargo test                    # 33 tests, all must pass
 cargo clippy --all-targets    # clean, no warnings
 cargo fmt --check             # clean
 cargo build --release         # the deployed artifact

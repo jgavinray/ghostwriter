@@ -59,6 +59,44 @@ E. Leftovers from the chat and the draft
 - Writing about the previous version: describe what the thing does now, not what it replaced. Changelogs, release notes, and migration guides are exempt."#
     )
 });
+/// ASD-STE100 (Issue 8) rules, paraphrased for the model. Appended to a
+/// base guide when a tool call sets `ste: true`; the mechanical half of
+/// the standard (dictionary lookups, semicolon/contraction/length checks)
+/// is enforced in code by `ste::check`, so this block concentrates on what
+/// only a model can do: choose approved words with the right meaning and
+/// rebuild sentences. The spec text itself is never quoted here.
+pub const STE_GUIDE: &str = "ASD-STE100 mode (Simplified Technical English). These rules override style preferences. They govern prose only: leave code blocks, inline code, commands, paths, and URLs untouched.
+
+Words
+- Use plain, concrete general words: put, make, check, set, start, stop, give, move, turn. When a word can be a verb, use it as a verb (\"check the seal\", not \"perform a check of the seal\").
+- Give each word one meaning. Use it in its literal sense, never figuratively (\"stop the process\", not \"kill the process\").
+- Do not use a noun as a verb (\"email the file\" -> \"send the file by email\"), and do not use slang or jargon.
+- Name the same thing with the same words everywhere in the document.
+- Replace dictionary-flagged words with their approved alternative whenever the meaning survives: utilize -> use, initiate -> start, terminate -> stop/end, prior to -> before, obtain -> get, purchase -> buy, sufficient -> enough, facilitate -> help, prioritize -> rank first, eliminate -> remove/does not, approximately -> about, component/part if the plain word fits.
+
+Verbs and tense
+- Use verbs only in these forms: base form, command form, simple present, simple past, the -ed form as an adjective, and will + base form for the future.
+- Never write perfect forms (has checked, had removed) or progressive forms (is checking, were removing). Rewrite them into an approved form.
+- Write instructions in the command form addressed to the reader (\"Set the torque to 12 N-m.\"). Write descriptions in the simple present with a real subject (\"The pump draws fluid from the tank.\").
+- Prefer active voice everywhere; in instructions it is required.
+
+Sentences
+- One instruction per sentence. Put two actions in one sentence only when they happen at the same time (\"Turn the screw until the gap is 2 mm\").
+- Instructions: at most 20 words. Descriptive sentences: at most 25 words. Split longer sentences; give each sentence one topic.
+- Long instruction chains become numbered steps, one action per step.
+- Keep noun groups to three words at most; break longer ones with a preposition or a that-clause (\"the bolts that attach the housing to the engine\").
+- Write the article (the, a, an) or this/these where it fits the noun.
+- Write complete words: no contractions (cannot, do not, it is).
+
+Punctuation
+- Never use a semicolon; write two sentences instead.
+- Use a hyphen only to join a compound adjective before a noun (high-pressure pump).
+- Give values with their units; treat each number-plus-unit as one word.
+
+Risk statements
+- When stating a danger to persons, open with Warning; for damage to equipment, Caution. Start with the command or condition, then state the consequence in its own sentence (\"WARNING: Wear a face mask before you fill the system. The fluid can blind you.\").
+
+Keep the output format the base guide requires: the STE rules change wording and sentence shape, not the document structure, and every fact still comes from the provided source or material.";
 
 /// Drafting guide: used by `document_code`.
 pub static STYLE_GUIDE: LazyLock<String> = LazyLock::new(|| {

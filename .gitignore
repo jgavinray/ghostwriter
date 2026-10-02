@@ -1,2 +1,5 @@
 /target
 .DS_Store
+
+# The global gitignore excludes *.tsv; the STE100 dictionary is a shipped asset.
+!assets/ste100-unapproved.tsv

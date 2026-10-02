@@ -1,4 +1,4 @@
-//! The MCP surface: five tools over the hemmingway-1 writing model, built
+//! The MCP surface: six tools over the hemmingway-1 writing model, built
 //! with rmcp's `#[tool_router]`/`#[tool]` macros (typed arguments, schemars
 //! schemas, stdio transport wiring done by the SDK).
 //!
@@ -33,6 +33,15 @@ fn user_prompt(head: &str, label: &str, body: &str) -> String {
 /// read — not a JSON-RPC protocol error.
 fn error_result(message: String) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(message)])
+}
+/// System prompt for one call: the base house guide plus the ASD-STE100
+/// block when the caller asked for STE mode.
+fn system_prompt(base: &str, ste: Option<bool>) -> String {
+    if ste.unwrap_or(false) {
+        format!("{base}\n\n{}", prompts::STE_GUIDE)
+    } else {
+        base.to_string()
+    }
 }
 
 /// Resolve an inline payload (`code` / `text`) or a file `path` into one
@@ -89,6 +98,9 @@ pub struct DocumentCodeArgs {
     /// Completion budget in tokens, 1..32768. Defaults to 8192.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Apply ASD-STE100 Simplified Technical English on top of the house style: approved general vocabulary, one meaning per word, command-form instructions, sentences within the STE length caps. ste_check reports mechanical violations without a model call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ste: Option<bool>,
     /// Sampling temperature, 0..2. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -114,6 +126,9 @@ pub struct RewriteProseArgs {
     /// Completion budget in tokens, 1..32768. Defaults to 4096.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Rewrite to ASD-STE100 Simplified Technical English on top of the house rules: approved vocabulary, approved verb forms, no semicolons or contractions, sentences within the STE caps (20 words for an instruction, 25 for description). Facts still survive verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ste: Option<bool>,
     /// Sampling temperature, 0..2. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -136,6 +151,9 @@ pub struct CritiqueProseArgs {
     /// Completion budget in tokens, 1..32768. Defaults to 4096.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Also report ASD-STE100 violations (unapproved vocabulary, semicolons, contractions, sentences over the STE length caps) as numbered faults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ste: Option<bool>,
     /// Sampling temperature, 0..2. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -176,9 +194,22 @@ pub struct ComposeArgs {
     /// Completion budget in tokens, 1..32768. Defaults to 8192.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Compose in ASD-STE100 Simplified Technical English on top of the house style: approved general vocabulary, command-form instructions, short one-topic sentences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ste: Option<bool>,
     /// Sampling temperature, 0..2. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SteCheckArgs {
+    /// The prose to check. Mutually exclusive with `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// A file whose contents to check. Mutually exclusive with `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -279,9 +310,13 @@ impl WritingServer {
         {
             head.push_str(&format!("\nAuthor notes (follow them): {notes}"));
         }
+        if args.ste.unwrap_or(false) {
+            head.push_str("\nStandard: ASD-STE100 Simplified Technical English (issue 8).");
+        }
+        let system = system_prompt(prompts::STYLE_GUIDE.as_str(), args.ste);
         Ok(self
             .render(
-                prompts::STYLE_GUIDE.as_str(),
+                &system,
                 &user_prompt(&head, "Source", &body),
                 self.clamp_tokens(args.max_tokens, 8192),
                 self.temperature(args.temperature),
@@ -338,6 +373,9 @@ impl WritingServer {
         {
             head.push_str(&format!("\nAudience: {audience}"));
         }
+        if args.ste.unwrap_or(false) {
+            head.push_str("\nStandard: ASD-STE100 Simplified Technical English (issue 8).");
+        }
         // The sample goes before the text: the model reads the voice it must
         // match first, mirroring the humanizer skill's sample-then-text order.
         let user = match voice {
@@ -346,9 +384,10 @@ impl WritingServer {
             ),
             None => user_prompt(&head, "Text to rewrite", &body),
         };
+        let system = system_prompt(prompts::REWRITE_GUIDE.as_str(), args.ste);
         Ok(self
             .render(
-                prompts::REWRITE_GUIDE.as_str(),
+                &system,
                 &user,
                 self.clamp_tokens(args.max_tokens, 4096),
                 self.temperature(args.temperature),
@@ -389,6 +428,9 @@ impl WritingServer {
                 " The writing sample defines the author's voice; do not flag a pattern the sample itself exhibits.",
             );
         }
+        if args.ste.unwrap_or(false) {
+            head.push_str(" Judge ASD-STE100 Simplified Technical English faults too (unapproved vocabulary, semicolons, contractions, sentences over 20 words for an instruction or 25 for description), quoting the phrase and giving the approved fix.");
+        }
         let mut user = format!("{head}\n\nText to review:\n````text\n{body}\n````");
         if let Some(sample) = voice {
             user.push_str(&format!(
@@ -398,9 +440,10 @@ impl WritingServer {
         if let Some(source) = source {
             user.push_str(&format!("\n\nReference source:\n````text\n{source}\n````"));
         }
+        let system = system_prompt(prompts::CRITIQUE_GUIDE.as_str(), args.ste);
         Ok(self
             .render(
-                prompts::CRITIQUE_GUIDE.as_str(),
+                &system,
                 &user,
                 self.clamp_tokens(args.max_tokens, 4096),
                 self.temperature(args.temperature),
@@ -496,15 +539,19 @@ impl WritingServer {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        if args.ste.unwrap_or(false) {
+            head.push_str("\nStandard: ASD-STE100 Simplified Technical English (issue 8).");
+        }
         let user = match previous {
             Some(prev) => format!(
                 "{head}\n\nMaterial:\n````text\n{body}\n````\n\nPrevious report:\n````text\n{prev}\n````"
             ),
             None => user_prompt(&head, "Material", &body),
         };
+        let system = system_prompt(prompts::COMPOSE_GUIDE.as_str(), args.ste);
         Ok(self
             .render(
-                prompts::COMPOSE_GUIDE.as_str(),
+                &system,
                 &user,
                 self.clamp_tokens(args.max_tokens, 8192),
                 self.temperature(args.temperature),
@@ -540,6 +587,31 @@ impl WritingServer {
         };
         Ok(CallToolResult::success(vec![content]))
     }
+
+    /// Deterministic ASD-STE100 Simplified Technical English check — no model call: reports unapproved general vocabulary with its approved replacement (against the STE100 Issue 8 controlled dictionary), semicolons, contractions, Latin abbreviations (etc., e.g., i.e.), and sentences over the STE caps (20 words for an instruction, 25 for description). Code blocks, inline code, commands, paths, and URLs are exempt. Returns JSON {clean, findings:[{line, quote, rule, fix}]}. Run it on technical prose before or instead of a model pass; findings are mechanical, so an empty list does not judge style. Provide `text` or `path` — exactly one.
+    #[tool(
+        description = "Deterministic ASD-STE100 Simplified Technical English check — no model call: reports unapproved general vocabulary with its approved replacement (against the STE100 Issue 8 dictionary), semicolons, contractions, Latin abbreviations, and sentences over the STE caps (20 words for an instruction, 25 for description). Code blocks, inline code, commands, paths, and URLs are exempt. Returns JSON {clean, findings:[{line, quote, rule, fix}]}. Findings are mechanical; an empty list does not judge style. Provide `text` or `path` — exactly one."
+    )]
+    async fn ste_check(
+        &self,
+        Parameters(args): Parameters<SteCheckArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let body = match source_body(args.text.as_deref(), args.path.as_deref()).await {
+            Ok(body) => body,
+            Err(e) => return Ok(error_result(e)),
+        };
+        let findings = crate::ste::check(&body);
+        let report = json!({
+            "clean": findings.is_empty(),
+            "dictionary": crate::ste::dictionary_len(),
+            "findings": findings,
+        });
+        let content = match ContentBlock::json(&report) {
+            Ok(content) => content,
+            Err(e) => return Ok(error_result(e.message.into_owned())),
+        };
+        Ok(CallToolResult::success(vec![content]))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -554,6 +626,7 @@ impl ServerHandler for WritingServer {
                  - rewrite_prose removes the AI-writing patterns from Wikipedia's \"Signs of AI writing\" (staged contrasts, one-line closers, forced triads, stock vocabulary, inflated significance, formatting-by-rule, chatbot residue) and preserves every fact: prose changes only, code blocks, commands, paths, and URLs stay intact, so it is safe on markdown files.\n\
                  - To humanize with visible checks: rewrite_prose, then critique_prose on the result, then rewrite_prose once more with the critique findings as `goal`.\n\
                  - To match a writer's voice, pass their prose as `voice_sample` to rewrite_prose (and critique_prose when reviewing): the sample steers register and word choice; em-dash rate preservation in rewrite is best-effort, and critique_prose judges dash rate against the sample.\n\
+                 - For technical documentation, pass ste: true to document_code, compose, rewrite_prose, or critique_prose to add ASD-STE100 Simplified Technical English (approved vocabulary, command-form instructions, short one-topic sentences); ste_check runs the mechanical half (dictionary lookups, semicolons, contractions, length caps) with no model call.\n\
                  - critique_prose returns exactly CLEAN when there is nothing to fix.\n\
                  - When the writing tools fail, call model_health first; it names the endpoint and the served model ids.\n",
             )
@@ -595,6 +668,7 @@ mod tests {
                 audience: None,
                 voice_sample: None,
                 max_tokens: None,
+                ste: None,
                 temperature: None,
             }))
             .await,
@@ -614,6 +688,7 @@ mod tests {
                 audience: None,
                 notes: None,
                 max_tokens: None,
+                ste: None,
                 temperature: None,
             }))
             .await,
@@ -633,6 +708,7 @@ mod tests {
                 audience: None,
                 notes: None,
                 max_tokens: None,
+                ste: None,
                 temperature: None,
             }))
             .await,
@@ -657,6 +733,7 @@ mod tests {
                 previous: None,
                 notes: None,
                 max_tokens: None,
+                ste: None,
                 temperature: None,
             }))
             .await,
@@ -681,6 +758,7 @@ mod tests {
                 previous: None,
                 notes: None,
                 max_tokens: None,
+                ste: None,
                 temperature: None,
             }))
             .await,
@@ -705,6 +783,7 @@ mod tests {
                 previous: None,
                 notes: None,
                 max_tokens: None,
+                ste: None,
                 temperature: None,
             }))
             .await,
@@ -724,5 +803,53 @@ mod tests {
 
         let missing = source_body(None, dir.join("nope").to_str()).await;
         assert!(missing.unwrap_err().contains("reading"));
+    }
+
+    #[tokio::test]
+    async fn ste_check_requires_source() {
+        let s = server();
+        assert_error_result(
+            s.ste_check(Parameters(SteCheckArgs {
+                text: None,
+                path: None,
+            }))
+            .await,
+            "provide",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ste_check_reports_planted_violations() {
+        let s = server();
+        let result = s
+            .ste_check(Parameters(SteCheckArgs {
+                text: Some(
+                    "The operator utilizes the gauge to initiate the pump; the reading is stable.\nSet the valve to the open position.\n".into(),
+                ),
+                path: None,
+            }))
+            .await
+            .expect("no protocol error");
+        assert_ne!(result.is_error, Some(true));
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("\"clean\":false"), "{text}");
+        assert!(text.contains("utilize"), "{text}");
+        assert!(text.contains("initiate"), "{text}");
+        assert!(text.contains("ste-semicolon"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn ste_check_clean_prose() {
+        let s = server();
+        let result = s
+            .ste_check(Parameters(SteCheckArgs {
+                text: Some("Turn the handle two full turns. Tighten the nut to 20 Nm.".into()),
+                path: None,
+            }))
+            .await
+            .expect("no protocol error");
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("\"clean\":true"), "{text}");
     }
 }
