@@ -410,14 +410,17 @@ mod tests {
             "only prose rules may fire: {rules:?}"
         );
     }
-    /// The `master` and `slave` needles each fire once on the space- and
-    /// hyphen-joined pair forms; the compound rows they once duplicated
-    /// only tripled reports or could never fire. The slash spelling is
-    /// masked as a path run before any needle sees it — like every other
-    /// slash-joined token — so only the model-side critique can judge it.
+
+    /// The `master` and `slave` needles each fire once on the space-,
+    /// hyphen-, and slash-joined pair forms. The compound rows they once
+    /// duplicated only tripled reports or could never fire. The slash
+    /// spelling must reach the word rules: before 2026-10-02 the path
+    /// masker blanked every slash-containing token, and this test pinned
+    /// that blindness (`is_empty()`); bias words written with a slash were
+    /// invisible to the mechanical checker.
     #[test]
     fn bias_pair_reports_once_per_word() {
-        for join in ["master slave", "master-slave"] {
+        for join in ["master slave", "master-slave", "master/slave"] {
             let quotes: Vec<String> =
                 ste::check_with(&format!("Configure the {join} pair."), &MICROSOFT_RULES)
                     .into_iter()
@@ -426,6 +429,5 @@ mod tests {
                     .collect();
             assert_eq!(quotes, ["master", "slave"], "{join}");
         }
-        assert!(ste::check_with("Configure the master/slave pair.", &MICROSOFT_RULES).is_empty());
     }
 }

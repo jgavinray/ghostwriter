@@ -1,4 +1,4 @@
-//! The MCP surface: six tools over the hemmingway-1 writing model, built
+//! The MCP surface: six tools over the configured writing model, built
 //! with rmcp's `#[tool_router]`/`#[tool]` macros (typed arguments, schemars
 //! schemas, stdio transport wiring done by the SDK).
 //!
@@ -20,13 +20,45 @@ use crate::client::Client;
 use crate::config::{Config, MAX_SOURCE_BYTES, MAX_TOKENS_CAP};
 use crate::{prompts, styles};
 
-/// Source/payload text arriving from a tool argument is fenced with four
-/// backticks; anything shorter collides with code blocks inside the
-/// documentation source far too often. The label is per-tool — a small
-/// model reads the framing noun, and "Source:" before prose invites it to
-/// treat prose as code.
+/// Longest run of consecutive backticks in `body`, + 1, floored at four:
+/// Source/payload text is fenced with at least four backticks — anything
+/// shorter collides with code blocks inside the documentation source far
+/// too often — and a body containing a fence of its own widens the frame so
+/// no content line can close it. The opener carries the `text` language tag;
+/// the closer uses the same run.
+fn fence_for(body: &str) -> String {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for byte in body.bytes() {
+        if byte == b'`' {
+            run += 1;
+            if run > longest {
+                longest = run;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat((longest + 1).max(4))
+}
+
+/// One fence shared by every payload section of a multi-section prompt: all
+/// sections fence at the widest run any of their bodies needs, so a fence
+/// line in one section can never be mistaken for another's frame.
+fn widest_fence(bodies: &[&str]) -> String {
+    bodies
+        .iter()
+        .map(|body| fence_for(body))
+        .max_by_key(String::len)
+        .unwrap_or_else(|| "`".repeat(4))
+}
+
+/// Source/payload text arriving from a tool argument is fenced around the
+/// body. The label is per-tool — a small model reads the framing noun, and
+/// "Source:" before prose invites it to treat prose as code.
 fn user_prompt(head: &str, label: &str, body: &str) -> String {
-    format!("{head}\n\n{label}:\n````text\n{body}\n````")
+    let fence = fence_for(body);
+    format!("{head}\n\n{label}:\n{fence}text\n{body}\n{fence}")
 }
 
 /// A tool-level failure as a normal `isError` result the calling agent can
@@ -98,20 +130,34 @@ async fn source_body(inline: Option<&str>, path: Option<&str>) -> Result<String,
         (None, None) => Err("provide the inline argument or `path`".into()),
         (Some(text), None) => Ok(text.to_string()),
         (None, Some(p)) => {
-            let bytes = tokio::fs::read(p)
-                .await
+            // Bounded read: at most MAX_SOURCE_BYTES+1 bytes ever reach
+            // memory, whatever the file's size on disk. The metadata/read
+            // pair is not atomic — the file may change between the two —
+            // so the marker reports the size at stat time; acceptable for a
+            // documentation tool, and any read error still fails loudly.
+            // The bound is pinned by the exact-cap off-by-one test and,
+            // against the pristine unbounded read, by the never-closing
+            // FIFO test below; ordinary file fixtures cannot discriminate
+            // a capped take() from a whole-file read.
+            use std::io::Read;
+            let mut prefix = Vec::new();
+            let total = std::fs::File::open(p)
+                .and_then(|file| {
+                    file.take((MAX_SOURCE_BYTES + 1) as u64)
+                        .read_to_end(&mut prefix)
+                })
+                .and_then(|_| std::fs::metadata(p).map(|m| m.len()))
                 .map_err(|e| format!("reading {p} failed: {e}"))?;
-            let truncated = bytes.len() > MAX_SOURCE_BYTES;
+            let truncated = prefix.len() > MAX_SOURCE_BYTES;
             let slice = if truncated {
-                &bytes[..MAX_SOURCE_BYTES]
+                &prefix[..MAX_SOURCE_BYTES]
             } else {
-                &bytes[..]
+                &prefix[..]
             };
             let mut text = String::from_utf8_lossy(slice).into_owned();
             if truncated {
                 text.push_str(&format!(
-                    "\n\n[ghostwriter: source truncated at {MAX_SOURCE_BYTES} bytes of {}; the rest was not sent to the model]\n",
-                    bytes.len()
+                    "\n\n[ghostwriter: source truncated at {MAX_SOURCE_BYTES} bytes of {total}; the rest was not sent to the model]\n",
                 ));
             }
             Ok(text)
@@ -347,9 +393,14 @@ impl WritingServer {
         CallToolResult::success(vec![ContentBlock::text(text)])
     }
 
-    /// Draft professional documentation for source code with the hemmingway-1 writing model: formal register, Oxford comma, active voice, no filler or puff words. Provide `code` (source text) or `path` (file to read) — exactly one. `kind` selects the document type (default api). The model describes only what the source actually does; review output against the code before publishing.
+    /// Draft professional documentation for source code with the configured
+    /// writing model: formal register, Oxford comma, active voice, no filler
+    /// or puff words. Provide `code` (source text) or `path` (file to read) —
+    /// exactly one. `kind` selects the document type (default api). The model
+    /// describes only what the source actually does; review output against
+    /// the code before publishing.
     #[tool(
-        description = "Draft professional documentation for source code with the hemmingway-1 writing model: formal register, Oxford comma, active voice, no filler or puff words. Provide `code` (source text) or `path` (file to read) — exactly one. `kind` selects the document type (default api). The model describes only what the source actually does; review output against the code before publishing."
+        description = "Draft professional documentation for source code with the configured writing model: formal register, Oxford comma, active voice, no filler or puff words. Provide `code` (source text) or `path` (file to read) — exactly one. `kind` selects the document type (default api). The model describes only what the source actually does; review output against the code before publishing."
     )]
     async fn document_code(
         &self,
@@ -432,11 +483,11 @@ impl WritingServer {
             .map(str::trim)
             .filter(|s| !s.is_empty());
         if voice.is_some() {
-            // Empirically tuned head pair (kaibo consult job-1 + live A/B,
-            // 2026-09-24): Goal + Voice lines in this exact wording are the
-            // only configuration observed to preserve the sample's dash
+            // Empirically tuned head pair (an external-model consult + live
+            // A/B, 2026-09-24): Goal + Voice lines in this exact wording are
+            // the only configuration observed to preserve the sample's dash
             // rate; later guide-side exception variants measured 0/10.
-            // Re-verify against any hemmingway-1 model update; degrade mode
+            // Re-verify against any writing-model update; degrade mode
             // is dashes normalized away, which critique_prose still judges
             // correctly against the sample.
             head.push_str(
@@ -465,9 +516,12 @@ impl WritingServer {
         // The sample goes before the text: the model reads the voice it must
         // match first, mirroring the humanizer skill's sample-then-text order.
         let user = match voice {
-            Some(sample) => format!(
-                "{head}\n\nWriting sample (match this voice):\n````text\n{sample}\n````\n\nText to rewrite:\n````text\n{body}\n````"
-            ),
+            Some(sample) => {
+                let fence = widest_fence(&[sample, &body]);
+                format!(
+                    "{head}\n\nWriting sample (match this voice):\n{fence}text\n{sample}\n{fence}\n\nText to rewrite:\n{fence}text\n{body}\n{fence}"
+                )
+            }
             None => user_prompt(&head, "Text to rewrite", &body),
         };
         let system = system_prompt(prompts::REWRITE_GUIDE.as_str(), style);
@@ -522,14 +576,24 @@ impl WritingServer {
         if let Some(style) = style {
             head.push_str(style.critique_line);
         }
-        let mut user = format!("{head}\n\nText to review:\n````text\n{body}\n````");
+        let mut sections = vec![body.as_str()];
+        if let Some(sample) = voice {
+            sections.push(sample);
+        }
+        if let Some(source) = source {
+            sections.push(source);
+        }
+        let fence = widest_fence(&sections);
+        let mut user = format!("{head}\n\nText to review:\n{fence}text\n{body}\n{fence}");
         if let Some(sample) = voice {
             user.push_str(&format!(
-                "\n\nWriting sample (defines the author's voice):\n````text\n{sample}\n````"
+                "\n\nWriting sample (defines the author's voice):\n{fence}text\n{sample}\n{fence}"
             ));
         }
         if let Some(source) = source {
-            user.push_str(&format!("\n\nReference source:\n````text\n{source}\n````"));
+            user.push_str(&format!(
+                "\n\nReference source:\n{fence}text\n{source}\n{fence}"
+            ));
         }
         let system = system_prompt(prompts::CRITIQUE_GUIDE.as_str(), style);
         Ok(self
@@ -639,9 +703,12 @@ impl WritingServer {
             head.push_str(&format!("\n{}", style.head_line));
         }
         let user = match previous {
-            Some(prev) => format!(
-                "{head}\n\nMaterial:\n````text\n{body}\n````\n\nPrevious report:\n````text\n{prev}\n````"
-            ),
+            Some(prev) => {
+                let fence = widest_fence(&[&body, prev]);
+                format!(
+                    "{head}\n\nMaterial:\n{fence}text\n{body}\n{fence}\n\nPrevious report:\n{fence}text\n{prev}\n{fence}"
+                )
+            }
             None => user_prompt(&head, "Material", &body),
         };
         let system = system_prompt(prompts::COMPOSE_GUIDE.as_str(), style);
@@ -655,9 +722,11 @@ impl WritingServer {
             .await)
     }
 
-    /// Check that the hemmingway-1 server is reachable and serving the configured model id. Call this first when the writing tools fail.
+    /// Check that the configured writing-model server is reachable and
+    /// serving the configured model id. Call this first when the writing
+    /// tools fail.
     #[tool(
-        description = "Check that the hemmingway-1 server is reachable and serving the configured model id. Call this first when the writing tools fail."
+        description = "Check that the configured writing-model server is reachable and serving the configured model id. Call this first when the writing tools fail."
     )]
     async fn model_health(&self) -> Result<CallToolResult, McpError> {
         let base_url = self.config.base_url.clone();
@@ -752,7 +821,7 @@ impl ServerHandler for WritingServer {
             .with_server_info(Implementation::new("ghostwriter", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "## Writing protocol (MCP: ghostwriter)\n\
-                 - Human-facing prose is finalized by the hemmingway-1 model through these tools: document_code drafts docs from source, compose writes standups, PRDs, one-pagers, announcements, summaries, release notes, postmortems, weekly statuses, and meeting notes from raw material, rewrite_prose rewrites existing text so it reads like a human wrote it, critique_prose reports findings without rewriting (optionally against a reference source).\n\
+                 - Human-facing prose is finalized by the configured writing model through these tools: document_code drafts docs from source, compose writes standups, PRDs, one-pagers, announcements, summaries, release notes, postmortems, weekly statuses, and meeting notes from raw material, rewrite_prose rewrites existing text so it reads like a human wrote it, critique_prose reports findings without rewriting (optionally against a reference source).\n\
                  - Draft with document_code, or compose from raw material, then pass the draft through critique_prose (and rewrite_prose for the final pass) before shipping it.\n\
                  - rewrite_prose removes the AI-writing patterns from Wikipedia's \"Signs of AI writing\" (staged contrasts, one-line closers, forced triads, stock vocabulary, inflated significance, formatting-by-rule, chatbot residue) and preserves every fact: prose changes only, code blocks, commands, paths, and URLs stay intact, so it is safe on markdown files.\n\
                  - To humanize with visible checks: rewrite_prose, then critique_prose on the result, then rewrite_prose once more with the critique findings as `goal`.\n\
@@ -941,6 +1010,265 @@ mod tests {
 
         let missing = source_body(None, dir.join("nope").to_str()).await;
         assert!(missing.unwrap_err().contains("reading"));
+    }
+
+    // --- Invariant 4: payload fences widen with the body ---------------------
+
+    /// A body line of exactly four backticks must not close the four-backtick
+    /// frame: the fence widens to five, and the body's own four-backtick line
+    /// survives verbatim inside the payload.
+    #[test]
+    fn user_prompt_widens_the_fence_for_a_four_backtick_body_line() {
+        let body = "before\n````\nafter\n";
+        let prompt = user_prompt("Task: document this", "Source", body);
+        let five = "`".repeat(5);
+        assert!(
+            prompt.contains(&format!("\n{five}text\n")),
+            "opener is not a 5-backtick fence line: {prompt}"
+        );
+        assert!(
+            prompt.ends_with(&format!("\n{five}")),
+            "closer is not a 5-backtick fence line: {prompt}"
+        );
+        // The body's 4-run is still there, verbatim, as content — and it is
+        // the ONLY pure-backtick line shorter than the fence, so nothing in
+        // the body can be mistaken for the frame.
+        let runs: Vec<&str> = prompt
+            .lines()
+            .filter(|l| !l.is_empty() && l.bytes().all(|b| b == b'`'))
+            .collect();
+        assert_eq!(runs, vec!["````", "`````"], "{prompt}");
+    }
+
+    /// Six-run body → seven-backtick fence.
+    #[test]
+    fn user_prompt_widens_the_fence_for_a_six_backtick_body_line() {
+        let body = "intro\n``````\n";
+        let prompt = user_prompt("Task: document this", "Source", body);
+        let seven = "`".repeat(7);
+        assert!(
+            prompt.contains(&format!("\n{seven}text\n")),
+            "opener is not a 7-backtick fence line: {prompt}"
+        );
+        assert!(
+            prompt.ends_with(&format!("\n{seven}")),
+            "closer is not a 7-backtick fence line: {prompt}"
+        );
+        assert!(
+            prompt.lines().any(|l| l == "``````"),
+            "body clipped: {prompt}"
+        );
+    }
+
+    /// Invariant: the fence NEVER narrows below four backticks — ordinary
+    /// bodies, ``` included, still get exactly ````.
+    #[test]
+    fn user_prompt_keeps_four_backticks_for_ordinary_bodies() {
+        let prompt = user_prompt("Task: document this", "Source", "ordinary ``` prose\n");
+        assert!(
+            prompt.contains("\n````text\n") && prompt.ends_with("\n````"),
+            "fence moved off the four-backtick floor: {prompt}"
+        );
+    }
+
+    // --- Invariant 2: truncation markers are visible --------------------------
+
+    /// Disk reads over the cap report the source-truncation marker with the
+    /// exact byte counts; a file at exactly the cap is sent whole, marker
+    /// free (off-by-one pin).
+    #[tokio::test]
+    async fn source_truncation_marker_pins_the_cap() {
+        let dir = std::env::temp_dir().join("ghostwriter-writer-cap");
+        std::fs::create_dir_all(&dir).unwrap();
+        let over = dir.join("over.txt");
+        std::fs::write(&over, vec![b'a'; MAX_SOURCE_BYTES + 1]).unwrap();
+        let body = source_body(None, over.to_str()).await.unwrap();
+        assert!(
+            body.contains("truncated at 400000 bytes of 400001"),
+            "missing/incorrect marker: {body}"
+        );
+        assert_eq!(&body[..MAX_SOURCE_BYTES], &"a".repeat(MAX_SOURCE_BYTES));
+        assert!(
+            body.ends_with("the rest was not sent to the model]\n"),
+            "marker must terminate the body: {body}"
+        );
+
+        let exact = dir.join("exact.txt");
+        std::fs::write(&exact, vec![b'a'; MAX_SOURCE_BYTES]).unwrap();
+        let body = source_body(None, exact.to_str()).await.unwrap();
+        assert_eq!(
+            body,
+            "a".repeat(MAX_SOURCE_BYTES),
+            "cap-sized file must have no marker"
+        );
+    }
+
+    /// Discriminating pin for the bounded disk read: a FIFO whose writer
+    /// pushes more than `MAX_SOURCE_BYTES + 1` bytes and NEVER closes its
+    /// handle. A capped `take(MAX+1)` read returns the moment the cap is
+    /// reached (observed ~1 ms on macOS, `File::open` rendezvous included);
+    /// an unbounded `read_to_end` waits for an EOF that never comes, so the
+    /// 5 s watchdog fires and this test fails — it fails on the pristine
+    /// whole-file-read engine, which the exact-cap file fixture cannot
+    /// discriminate. The writer keeps the FIFO open deliberately: closing
+    /// it would hand `read_to_end` a real EOF.
+    ///
+    /// On red the orphaned blocking read parks forever; the runtime is
+    /// leaked (`mem::forget`) so its Drop cannot hang the suite, and the
+    /// parked writer thread dies with the test process — never a hang.
+    #[test]
+    fn bounded_disk_read_returns_from_a_fifo_that_never_closes() {
+        let dir =
+            std::env::temp_dir().join(format!("ghostwriter-writer-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("src.fifo");
+        assert!(std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo")
+            .success());
+        let fifo_w = fifo.clone();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            // Write-open blocks until the reader opens: no lost-wakeup race.
+            let mut f = match std::fs::OpenOptions::new().write(true).open(&fifo_w) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let piece = vec![b'a'; 64 * 1024];
+            let mut left = 2 * MAX_SOURCE_BYTES + 16;
+            while left > 0 {
+                match f.write(&piece[..left.min(piece.len())]) {
+                    Ok(k) => left -= k,
+                    Err(_) => return, // the reader hung up; nothing left to do
+                }
+            }
+            // All bytes are queued, but the handle STAYS OPEN: an uncapped
+            // read must never see EOF.
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        });
+
+        // The read is blocking, so it must run on its own worker: a
+        // current-thread runtime would park its only thread inside the
+        // (uncapped, red) read and the watchdog timer could never fire.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(3)
+            .enable_time()
+            .build()
+            .unwrap();
+        let path = fifo.to_str().unwrap().to_string();
+        let raced = rt.block_on(async {
+            let read = tokio::spawn(async move { source_body(None, Some(&path)).await });
+            tokio::time::timeout(std::time::Duration::from_secs(5), read).await
+        });
+        // Red leaks the parked worker thread; forgetting the runtime keeps
+        // Drop from joining it and hanging the suite.
+        std::mem::forget(rt);
+        let body = raced
+            .expect(
+                "the capped read hung past its 5 s watchdog: an unbounded \
+                 read_to_end is waiting for an EOF this FIFO never sends",
+            )
+            .expect("the FIFO read task panicked")
+            .expect("the FIFO read must succeed");
+        assert_eq!(&body[..MAX_SOURCE_BYTES], &"a".repeat(MAX_SOURCE_BYTES));
+        assert!(
+            body.contains("truncated at 400000 bytes of"),
+            "missing marker: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A completion that ends with finish_reason "length" gets the visible
+    /// re-call hint on a successful (isError false) result — and exactly one
+    /// connection: a truncated generation is not resent.
+    #[tokio::test]
+    async fn length_truncation_gets_the_recall_hint_on_one_connection() {
+        use std::sync::atomic::Ordering;
+        let chunks = vec![
+            format!(
+                "data: {}\n\n",
+                json!({"choices": [{"delta": {"content": "half a document"}, "finish_reason": "length"}]})
+            ),
+            "data: [DONE]\n\n".to_string(),
+        ];
+        let (url, hits) = serve_sse(chunks).await;
+        let s = WritingServer::new(Config {
+            base_url: url,
+            model: "test-model".into(),
+            temperature: 0.3,
+            timeout: std::time::Duration::from_secs(5),
+            idle_timeout: std::time::Duration::from_secs(5),
+            style: "none".into(),
+        })
+        .unwrap();
+        let result = s
+            .document_code(Parameters(DocumentCodeArgs {
+                code: Some("fn main() {}".into()),
+                path: None,
+                kind: None,
+                audience: None,
+                notes: None,
+                max_tokens: None,
+                style: None,
+                ste_legacy: serde_json::Value::Null,
+                temperature: None,
+            }))
+            .await
+            .expect("no protocol error");
+        assert_ne!(result.is_error, Some(true));
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.starts_with("half a document"), "{text}");
+        assert!(
+            text.ends_with("[ghostwriter: output truncated at max_tokens=8192 — re-call with a larger max_tokens or a smaller source]"),
+            "missing re-call hint: {text}"
+        );
+        assert!(text.contains("re-call with a larger max_tokens"), "{text}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "truncated answer was resent"
+        );
+    }
+
+    // --- Invariant 5: the token cap ------------------------------------------
+
+    #[test]
+    fn clamp_tokens_pins_the_floor_default_and_cap() {
+        let s = server();
+        assert_eq!(s.clamp_tokens(None, 8192), 8192);
+        assert_eq!(s.clamp_tokens(Some(0), 4096), 1);
+        assert_eq!(s.clamp_tokens(Some(u32::MAX), 4096), 32768);
+        assert_eq!(MAX_TOKENS_CAP, 32768);
+        assert_eq!(s.clamp_tokens(Some(u32::MAX), 4096), MAX_TOKENS_CAP);
+    }
+
+    /// Local canned SSE server — the client.rs tests' pattern, duplicated
+    /// here (client.rs is another module's file) so the writer can pin the
+    /// render() half of the length-truncation invariant. Serves the scripted
+    /// chunks to every connection and counts them.
+    async fn serve_sse(chunks: Vec<String>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+                let _ = sock.write_all(head.as_bytes()).await;
+                for c in &chunks {
+                    let _ = sock.write_all(c.as_bytes()).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        (url, hits)
     }
 
     #[tokio::test]

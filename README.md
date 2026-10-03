@@ -73,9 +73,13 @@ idle_timeout_secs = 60
 style = "none"
 ```
 
-`timeout_secs` bounds one whole generation attempt, including queueing. A busy engine holds a queued request in silence until its first token. `idle_timeout_secs` stops a stream only after it began emitting and then went silent. The server never resends a timed-out or stalled request. It is already working on it. Resends cover only connection failures, 429, 5xx, and empty completions. The MCP client's per-server timeout must exceed `timeout_secs`. Otherwise, the client reports a transport timeout before the server can return a readable error.
+`timeout_secs` bounds one whole generation attempt, including queueing. A busy engine holds a queued request in silence until its first token. `idle_timeout_secs` stops a stream only after it began emitting and then went silent. The server never resends a timed-out or stalled request. It is already working on it. Resends cover only connection failures before the first response byte, 429, 5xx, and empty completions. The MCP client's per-server timeout must exceed `timeout_secs`. Otherwise, the client reports a transport timeout before the server can return a readable error.
 
-The built-in defaults point at the fleet's writing-model server (`http://hyper03:8002/v1`, model `hemmingway-1`). An install anywhere else must set `base_url` and `model` in the file or the environment.
+`timeout_secs` and `idle_timeout_secs` must not exceed 86,400 (one day):
+larger values are refused at startup, and the error names the cap.
+
+The built-in defaults point at the default writing-model server
+(`http://hyper03:8002/v1`, model `hemmingway-1`). An install anywhere else must set `base_url` and `model` in the file or the environment.
 
 Verify resolution without starting the server:
 

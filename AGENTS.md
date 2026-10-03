@@ -6,10 +6,14 @@ A single-binary MCP server (rmcp 3.4, tokio, reqwest) exposing six writing
 tools over stdio, backed by the locally served `hemmingway-1` model. Coding
 agents call it to finalize human-facing prose. The repository lives at
 `git@github.com:jgavinray/ghostwriter.git` (remote `origin`, branch `main`);
-cross-session state lives in `~/exomemory/`, never here.
+cross-session state lives outside this repository (in the side-band
+memory), never here.
 
 ## Layout
 
+- `src/lib.rs` — crate root: module wiring. Declares the `client`, `config`,
+  `prompts`, `ste`, `styles`, and `writer` modules and carries the crate-level
+  doc; `main.rs` and the tests link against it.
 - `src/main.rs` — entry point. Arg parsing (`--config <path>`, `--self-check`,
   `--help`), one-time config resolution, stdio serving. Exits 1 on any
   configuration that cannot resolve.
@@ -61,8 +65,9 @@ cross-session state lives in `~/exomemory/`, never here.
   tool argument, `ste = true` config key, and `GHOSTWRITER_STE` env var are
   refused loudly with `style` named as the replacement — a stale caller
   must never silently lose the standard it asked for.
-- Inline payloads are fenced with four backticks in `user_prompt`; shorter
-  fences collide with real content.
+- Inline payloads are fenced in `user_prompt` with at least four backticks,
+  widened past the longest backtick run in any payload section (shorter or
+  un-widened fences collide with real content).
 - `MAX_TOKENS_CAP` (32768) exists because the served context is 131072 tokens;
   do not raise it without checking the model's context.
 - Retry policy: exactly one resend, only for `AttemptError::Retryable`. The
@@ -88,7 +93,9 @@ cross-session state lives in `~/exomemory/`, never here.
   `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`,
   `GHOSTWRITER_IDLE_TIMEOUT_SECS`, `GHOSTWRITER_STYLE` (a registered id,
   case-insensitive). `GHOSTWRITER_STE` is retired and refused at startup.
-  There are no legacy `HEMMINGWAY_*` aliases.
+  There are no legacy `HEMMINGWAY_*` aliases. `timeout_secs` and
+  `idle_timeout_secs` (file or env) above 86,400 (one day) are refused at
+  startup, and the error names the cap.
 - `style` (string, default `"none"`) is the server-side default for the
   per-call `style` argument, validated against the registry at startup:
   with `style = "ste"`, calls that omit the argument compose in ASD-STE100;
@@ -99,7 +106,7 @@ cross-session state lives in `~/exomemory/`, never here.
 ## Verify before claiming done
 
 ```sh
-cargo test                    # 58 tests, all must pass
+cargo test                    # every test must pass
 cargo clippy --all-targets    # clean, no warnings
 cargo fmt --check             # clean
 cargo build --release         # the deployed artifact
@@ -107,14 +114,14 @@ target/release/ghostwriter --self-check
 ```
 
 The release binary is what the MCP client runs (see the `ghostwriter` entry in
-`~/.omp/agent/mcp.json`). After any source change, rebuild it and re-run
+your MCP client's registration file). After any source change, rebuild it and re-run
 `--self-check`; a source-only change ships nothing.
 
 ## Live checks
 
 Prompt-guide changes need a live call, not just tests: pipe an initialize +
 `tools/call` handshake into the binary over stdio, or invoke the registered
-tool from an omp session (`model_health` is the cheapest probe). The style
+tool from an MCP client session (`model_health` is the cheapest probe). The style
 guides are judged by their effect on model output; a green test suite says
 nothing about prose quality.
 
@@ -123,5 +130,5 @@ nothing about prose quality.
 - The MCP client registration carries no `env` block; the config file at
   `~/.config/ghostwriter/config.toml` is the deployment surface. Env vars
   remain available for per-launch overrides.
-- omp sessions started before an `mcp.json` or binary change keep the old
-  server until the next omp start.
+- MCP client sessions started before an `mcp.json` or binary change keep the
+  old server until the client is next started.

@@ -7,10 +7,10 @@
 //! on it, so a resend only doubles the load and guarantees the caller's
 //! outer budget expires before either attempt reports. Resends cover the
 //! faults a resend can actually heal: connection failures before any
-//! response, HTTP 429, HTTP 5xx, and empty completions. Everything else —
-//! any other 4xx, broken chunk JSON, a stream that dies before [DONE] —
-//! fails immediately with the server's own explanation (a bad model id will
-//! not heal on resend).
+//! response byte, HTTP 429, HTTP 5xx, and empty completions. Everything
+//! else — any other 4xx, broken chunk JSON, a stream that dies after its
+//! first byte — fails immediately with the server's own explanation (a bad
+//! model id will not heal on resend).
 
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -27,7 +27,7 @@ pub struct Completion {
 /// One failed attempt, classified by whether resending can plausibly help.
 #[derive(Debug)]
 enum AttemptError {
-    /// Connection failure before any response, HTTP 429, HTTP 5xx — a
+    /// Connection failure before any response byte, HTTP 429, HTTP 5xx — a
     /// resend is justified because the server did not start the work.
     Retryable(String),
     /// Timeout or stall (the server is working on this request right now),
@@ -89,7 +89,7 @@ impl Client {
                 Ok(c) => return Ok(c),
                 Err(AttemptError::Retryable(e)) => last_err = e,
                 Err(AttemptError::Fatal(e)) => {
-                    return Err(format!("hemmingway-1 request failed: {e}"))
+                    return Err(format!("{} request failed: {e}", cfg.model))
                 }
             }
             if attempt == 0 {
@@ -97,7 +97,8 @@ impl Client {
             }
         }
         Err(format!(
-            "hemmingway-1 request failed after 2 attempts: {last_err}"
+            "{} request failed after 2 attempts: {last_err}",
+            cfg.model
         ))
     }
 
@@ -118,10 +119,17 @@ impl Client {
         if status >= 400 {
             // 429/5xx may heal on resend; any other 4xx will not. Surface
             // the server's own explanation either way.
-            let text = resp.text().await.map_err(|e| {
-                AttemptError::Retryable(format!("reading response body failed: {e}"))
-            })?;
-            let detail = format!("HTTP {status} from {url}: {}", clip(&text));
+            // Bound the read: a broken server must not make us buffer an
+            // unbounded error body — clip() truncates to far less anyway,
+            // and the helper stops draining (never just hides) the excess.
+            let mut resp = resp;
+            let (raw, _) = read_capped(&mut resp)
+                .await
+                .map_err(AttemptError::Retryable)?;
+            let detail = format!(
+                "HTTP {status} from {url}: {}",
+                clip(&String::from_utf8_lossy(&raw))
+            );
             return Err(if status == 429 || status >= 500 {
                 AttemptError::Retryable(detail)
             } else {
@@ -152,10 +160,11 @@ impl Client {
             }
             .map_err(|e| {
                 let detail = format!("stream from {url} failed: {e}");
-                // A dropped connection before the first token is a
-                // dead worker a resend can survive; anything after text
-                // began streaming, or the overall timeout, is not.
-                if !e.is_timeout() && sse.text.is_empty() {
+                // A dropped connection before the first byte is a dead
+                // worker a resend can survive; once any byte has arrived
+                // the engine has this request, and the overall timeout
+                // means it is mid-generation — neither heals on resend.
+                if !sse.bytes_seen && !e.is_timeout() {
                     AttemptError::Retryable(detail)
                 } else {
                     AttemptError::Fatal(detail)
@@ -174,20 +183,30 @@ impl Client {
     /// Served-model list for health reporting.
     pub async fn list_models(&self, cfg: &Config) -> Result<Vec<String>, String> {
         let url = format!("{}/models", cfg.base_url);
-        let resp = self
+        let mut resp = self
             .http_health
             .get(&url)
             .send()
             .await
             .map_err(|e| format!("request to {url} failed: {e}"))?;
         let status = resp.status().as_u16();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| format!("reading response body failed: {e}"))?;
+        let (raw, overflowed) = read_capped(&mut resp).await?;
         if status != 200 {
-            return Err(format!("HTTP {status} from {url}: {}", clip(&text)));
+            return Err(format!(
+                "HTTP {status} from {url}: {}",
+                clip(&String::from_utf8_lossy(&raw))
+            ));
         }
+        if overflowed {
+            // The prefix is deliberately not parsed: a /models list past
+            // what any honest server sends is deemed invalid, never
+            // truncated into a partial truth.
+            return Err(format!(
+                "{} returned an unreadable /models response",
+                cfg.model
+            ));
+        }
+        let text = String::from_utf8_lossy(&raw);
         let value: Value =
             serde_json::from_str(&text).map_err(|e| format!("unparseable /models body: {e}"))?;
         Ok(value
@@ -200,6 +219,32 @@ impl Client {
             })
             .unwrap_or_default())
     }
+}
+
+/// Read a response body with the hard cap applied: at most
+/// `MAX_ERROR_BODY_BYTES + 1` bytes ever reach memory, and past the cap the
+/// reader stops draining entirely (the socket dies on its own) rather than
+/// hiding an unbounded download. The second element reports whether the body
+/// exceeded the cap; callers that display the body (clipped to far less)
+/// ignore it, callers that would parse it must not.
+async fn read_capped(resp: &mut reqwest::Response) -> Result<(Vec<u8>, bool), String> {
+    let mut raw: Vec<u8> = Vec::new();
+    let mut overflowed = false;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(b)) => {
+                let room = (MAX_ERROR_BODY_BYTES + 1).saturating_sub(raw.len());
+                raw.extend_from_slice(&b[..b.len().min(room)]);
+                if raw.len() > MAX_ERROR_BODY_BYTES {
+                    overflowed = true;
+                    break; // stop draining; the socket closes on its own
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return Err(format!("reading response body failed: {e}")),
+        }
+    }
+    Ok((raw, overflowed))
 }
 
 /// Incremental SSE reader: buffers raw bytes, parses complete `data:` lines
@@ -222,6 +267,12 @@ impl SseTail {
     /// a transient fault.
     fn push(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.pending.extend_from_slice(bytes);
+        if self.pending.len() > MAX_SSE_PENDING_BYTES {
+            return Err(format!(
+                "unbounded SSE line: {} bytes without a newline",
+                self.pending.len()
+            ));
+        }
         while let Some(nl) = self.pending.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=nl).collect();
             self.handle_line(&line)?;
@@ -258,6 +309,12 @@ impl SseTail {
             .and_then(Value::as_str)
         {
             self.text.push_str(delta);
+            if self.text.len() > MAX_SSE_TEXT_BYTES {
+                return Err(format!(
+                    "server sent more text than any completion can hold ({} bytes)",
+                    self.text.len()
+                ));
+            }
         }
         Ok(())
     }
@@ -279,6 +336,14 @@ impl SseTail {
     }
 }
 
+/// Hard caps on what a single exchange may make us buffer: no error body
+/// needs more than this (it is clipped far shorter), no SSE line survives
+/// 16 MiB of buffer without a newline, and no completion holds 4 MiB of
+/// text (MAX_TOKENS_CAP cannot produce it).
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_SSE_PENDING_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SSE_TEXT_BYTES: usize = 4 * 1024 * 1024;
+
 fn clip(s: &str) -> String {
     const CAP: usize = 500;
     if s.len() <= CAP {
@@ -295,7 +360,7 @@ fn clip(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn sse_chunk(text: &str, finish: Option<&str>) -> String {
@@ -521,5 +586,286 @@ mod tests {
         );
         assert!(!err.contains("after 2 attempts"), "queue resent: {err}");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// SSE server that announces a body far larger than it writes: the
+    /// client sees the 200 head plus one comment line, then the body is cut
+    /// short when the socket closes — a mid-stream drop with bytes seen but
+    /// zero content text.
+    async fn serve_sse_truncated_early(comment: String) -> (String, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body_len = comment.len() + 1024;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\ncontent-length: {body_len}\r\n\r\n{comment}"
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                // Body short by 1024 bytes: drop the socket and a later
+                // chunk() must surface a mid-body error.
+                drop(sock);
+            }
+        });
+        (url, hits)
+    }
+
+    /// Headers + keep-alive bytes arrived — the engine already has this
+    /// request — then the stream died before any content: the documented
+    /// policy is fail immediately; a resend only doubles the load.
+    #[tokio::test]
+    async fn stream_drop_after_bytes_is_not_resent() {
+        let (url, hits) = serve_sse_truncated_early(": keepalive\n\n".to_string()).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(
+            !err.contains("after 2 attempts"),
+            "mid-stream drop after bytes was resent: {err}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// A 429 may heal on resend: exactly one resend, then the error surfaces.
+    #[tokio::test]
+    async fn http_429_is_retried_once() {
+        let (url, hits) = serve(vec![429, 429]).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(err.contains("HTTP 429"), "unexpected error: {err}");
+        assert!(err.contains("after 2 attempts"), "429 not retried: {err}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// A well-formed stream that yields zero content is resent exactly once.
+    #[tokio::test]
+    async fn empty_completion_is_retried_once() {
+        let chunks = vec![sse_chunk("", Some("stop")), "data: [DONE]\n\n".to_string()];
+        let (url, hits) = serve_sse(chunks, Duration::from_millis(50)).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(err.contains("empty completion"), "unexpected error: {err}");
+        assert!(
+            err.contains("after 2 attempts"),
+            "empty completion not retried: {err}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// Nothing ever listens: a connection failure before any response is
+    /// resent exactly once.
+    #[tokio::test]
+    async fn refused_connection_resends_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let cfg = http_config(format!("http://{addr}"));
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(
+            err.contains("after 2 attempts"),
+            "refused connection not resent: {err}"
+        );
+    }
+
+    /// The SseTail caps are enforced directly, without a server: a line
+    /// that never terminates must not buffer without bound…
+    #[test]
+    fn sse_rejects_unbounded_pending_line() {
+        let mut sse = SseTail::default();
+        let huge = vec![b'a'; 16 * 1024 * 1024 + 1];
+        let err = sse.push(&huge).unwrap_err();
+        assert!(
+            err.contains("unbounded SSE line"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// …and accumulated text beyond any conceivable completion must abort
+    /// the stream instead of accumulating forever.
+    #[test]
+    fn sse_rejects_unbounded_text() {
+        let mut sse = SseTail::default();
+        let piece = "x".repeat(4096);
+        let delta = json!({"choices": [{"delta": {"content": piece}}]}).to_string();
+        let line = format!("data: {delta}\n\n");
+        for _ in 0..(4 * 1024 * 1024 / 4096) {
+            sse.push(line.as_bytes()).unwrap();
+        }
+        let err = sse.push(line.as_bytes()).unwrap_err();
+        assert!(
+            err.contains("more text than any completion can hold"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// User-facing errors name the configured model, not a hardcoded id.
+    #[tokio::test]
+    async fn errors_name_the_configured_model() {
+        let (url, _hits) = serve(vec![400]).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(
+            err.contains("test-model request failed"),
+            "unexpected error: {err}"
+        );
+
+        let (url, _hits) = serve(vec![500, 500]).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(
+            err.contains("test-model request failed after 2 attempts"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- m8: the 64 KiB error-body cap must actually stop draining ---------
+
+    /// Server that answers with a 400 whose body is `body_len` bytes of
+    /// junk, and reports — server-side, where the client cannot fake it —
+    /// how many bytes the client actually pulled, and whether the write
+    /// ever completed. `content-length` matches the body exactly, so a
+    /// client that fully drains leaves the server with a completed write;
+    /// a client that stops reading hangs the server up with EPIPE.
+    async fn serve_huge_error(body_len: usize) -> (String, Arc<AtomicU64>, Arc<AtomicBool>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let pulled = Arc::new(AtomicU64::new(0));
+        let counted = pulled.clone();
+        let drained = Arc::new(AtomicBool::new(false));
+        let drained_flag = drained.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {body_len}\r\n\r\n"
+                );
+                if sock.write_all(head.as_bytes()).await.is_err() {
+                    continue;
+                }
+                let piece = vec![b'x'; 8 * 1024];
+                let mut left = body_len;
+                let mut ok = true;
+                while left > 0 {
+                    let n = left.min(piece.len());
+                    if sock.write_all(&piece[..n]).await.is_err() {
+                        ok = false; // the client stopped reading and hung up
+                        break;
+                    }
+                    counted.fetch_add(n as u64, Ordering::SeqCst);
+                    left -= n;
+                }
+                drained_flag.store(ok, Ordering::SeqCst);
+            }
+        });
+        (url, pulled, drained)
+    }
+
+    /// The 64 KiB error-body cap must bound the wire, not just our buffer:
+    /// a client that stops draining at the cap leaves the server's writes
+    /// unfinished (EPIPE once the hangup reaches it). An unbounded
+    /// `resp.text()` drains the entire body and the server observes a
+    /// complete write — pre-fix, both assertions below fail. The body is
+    /// 32 MiB so no socket-buffer capacity can absorb it invisibly.
+    #[tokio::test]
+    async fn error_body_read_stops_at_the_cap() {
+        const BODY: usize = 32 * 1024 * 1024;
+        let (url, pulled, drained) = serve_huge_error(BODY).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(err.contains("HTTP 400"), "unexpected error: {err}");
+        assert!(!err.contains("after 2 attempts"), "4xx resent: {err}");
+        // Let the server observe the client's hangup (the reset arrives
+        // after the response object drops) before reading the counters.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let seen = pulled.load(Ordering::SeqCst);
+        assert!(
+            !drained.load(Ordering::SeqCst),
+            "the client drained the whole {BODY}-byte error body ({seen} bytes); \
+             the 64 KiB cap did not stop the drain"
+        );
+        assert!(
+            seen < BODY as u64 / 8,
+            "client pulled {seen} bytes of error body — far past the cap \
+             plus any plausible kernel buffering"
+        );
+    }
+
+    // --- m8: /models is bounded the same way ---------------------------------
+
+    /// Canned /models server: serves each scripted 200 body to one
+    /// connection, counting connections.
+    async fn serve_models(bodies: Vec<String>) -> (String, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            let mut bodies = bodies.into_iter();
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let Some(body) = bodies.next() else { break };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        (url, hits)
+    }
+
+    /// A /models response larger than the cap is refused as unreadable —
+    /// the truncated prefix is never parsed — while an honest small body
+    /// still parses exactly as before. Pre-fix the unbounded `resp.text()`
+    /// happily parses this very body, so the unwrap_err fails.
+    #[tokio::test]
+    async fn list_models_refuses_an_oversized_body() {
+        // Valid JSON end to end: any reader that buffers it all parses it.
+        let fat = json!({
+            "object": "list",
+            "data": [{ "id": "served-a", "padding": "x".repeat(1024 * 1024) }],
+        })
+        .to_string();
+        assert!(fat.len() > 64 * 1024);
+        let (url, hits) = serve_models(vec![fat]).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.list_models(&cfg).await.unwrap_err();
+        assert!(
+            err.contains("test-model returned an unreadable /models response"),
+            "oversized /models body accepted: {err}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "health call was resent");
+
+        let honest = json!({
+            "object": "list",
+            "data": [{ "id": "served-a" }, { "id": "served-b" }],
+        })
+        .to_string();
+        let (url, _hits) = serve_models(vec![honest]).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        assert_eq!(
+            client.list_models(&cfg).await.unwrap(),
+            vec!["served-a".to_string(), "served-b".to_string()]
+        );
     }
 }

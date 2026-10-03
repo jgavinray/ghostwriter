@@ -39,9 +39,14 @@ pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
 /// model's context is 131072 tokens; 32768 leaves room for source payloads.
 pub const MAX_TOKENS_CAP: u32 = 32768;
 
-/// Largest source payload read from disk, in bytes (~30k tokens). Larger
-/// files are truncated WITH a visible marker — silent truncation would
-/// make the model document half a file and call it complete.
+/// Largest source payload read from disk, in bytes: 400,000 is roughly
+/// 100k tokens at a four-bytes-per-token heuristic (code ASCII skews
+/// denser, prose lighter). Together with `max_tokens` up to
+/// `MAX_TOKENS_CAP`, a maximal payload CAN exceed the 131072-token
+/// served context; the served engine then rejects the request with a 4xx
+/// that surfaces verbatim as an `isError` tool result — never silent.
+/// Larger files are truncated WITH a visible marker — silent truncation
+/// would make the model document half a file and call it complete.
 pub const MAX_SOURCE_BYTES: usize = 400_000;
 
 #[derive(Debug, Clone)]
@@ -161,12 +166,23 @@ fn build(
             "temperature must be a finite number: {temperature}"
         ));
     }
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS).max(1));
-    let idle_timeout = Duration::from_secs(
-        idle_timeout_secs
-            .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS)
-            .max(1),
-    );
+    // A timeout past one day is a typo, not a knob; refuse it at startup
+    // naming the cap — silently clamping config is this repo's enemy.
+    const MAX_TIMEOUT_SECS: u64 = 86_400;
+    let timeout_secs = timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
+    if timeout_secs > MAX_TIMEOUT_SECS {
+        return Err(format!(
+            "timeout_secs must not exceed {MAX_TIMEOUT_SECS} (one day): {timeout_secs}"
+        ));
+    }
+    let idle_timeout_secs = idle_timeout_secs.unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS);
+    if idle_timeout_secs > MAX_TIMEOUT_SECS {
+        return Err(format!(
+            "idle_timeout_secs must not exceed {MAX_TIMEOUT_SECS} (one day): {idle_timeout_secs}"
+        ));
+    }
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let idle_timeout = Duration::from_secs(idle_timeout_secs.max(1));
     if idle_timeout >= timeout {
         return Err(format!(
             "idle_timeout ({idle_timeout:?}) must be shorter than timeout ({timeout:?}): \
@@ -204,6 +220,10 @@ fn env_str(key: &str) -> Option<String> {
 
 fn env_f32(key: &str) -> Result<Option<f32>, String> {
     match std::env::var(key) {
+        // An exported-but-empty value means "unset", as in `env_str` and
+        // `env_present` — an empty GHOSTWRITER_TEMPERATURE falls back to
+        // the default instead of dying at startup.
+        Ok(value) if value.is_empty() => Ok(None),
         Ok(value) => value
             .parse::<f32>()
             .map(Some)
@@ -214,6 +234,8 @@ fn env_f32(key: &str) -> Result<Option<f32>, String> {
 
 fn env_u64(key: &str) -> Result<Option<u64>, String> {
     match std::env::var(key) {
+        // Empty means "unset" — see `env_f32`.
+        Ok(value) if value.is_empty() => Ok(None),
         Ok(value) => value
             .parse::<u64>()
             .map(Some)
@@ -377,5 +399,82 @@ mod tests {
         assert_eq!(c.style, "google");
         let c = load(Some(&file)).unwrap();
         assert_eq!(c.style, "none");
+    }
+
+    /// N1: an exported-but-empty `GHOSTWRITER_TEMPERATURE` /
+    /// `GHOSTWRITER_TIMEOUT_SECS` / `GHOSTWRITER_IDLE_TIMEOUT_SECS` means
+    /// "unset" — the same rule `env_str` and `env_present` apply — so the
+    /// default stands instead of dying at startup. A non-empty garbage
+    /// value still dies, naming the key.
+    #[test]
+    fn empty_numeric_env_values_fall_back_to_defaults() {
+        let _g = load_lock();
+        struct ClearEnv(String);
+        impl Drop for ClearEnv {
+            fn drop(&mut self) {
+                std::env::remove_var("GHOSTWRITER_TEMPERATURE");
+                std::env::remove_var("GHOSTWRITER_TIMEOUT_SECS");
+                std::env::remove_var("GHOSTWRITER_IDLE_TIMEOUT_SECS");
+                std::env::set_var("HOME", &self.0);
+            }
+        }
+        // Point HOME at an empty directory so load(None) resolves the
+        // defaults with no config file in the way.
+        let home = std::env::var("HOME").unwrap_or_default();
+        let isolation = std::env::temp_dir().join("ghostwriter-empty-env-test");
+        std::fs::create_dir_all(&isolation).unwrap();
+        std::env::set_var("HOME", &isolation);
+        let _clear = ClearEnv(home);
+        std::env::set_var("GHOSTWRITER_TEMPERATURE", "");
+        std::env::set_var("GHOSTWRITER_TIMEOUT_SECS", "");
+        std::env::set_var("GHOSTWRITER_IDLE_TIMEOUT_SECS", "");
+        let c = load(None).expect("empty numeric env values must fall back to defaults");
+        assert_eq!(c.temperature, DEFAULT_TEMPERATURE);
+        assert_eq!(c.timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(
+            c.idle_timeout,
+            Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)
+        );
+
+        // The contrast: a non-empty garbage value is still a loud startup
+        // error naming the key and the offending text.
+        std::env::set_var("GHOSTWRITER_TEMPERATURE", "scalding");
+        let err = load(None).unwrap_err();
+        std::env::remove_var("GHOSTWRITER_TEMPERATURE");
+
+        assert!(
+            err.contains("GHOSTWRITER_TEMPERATURE is not a number: scalding"),
+            "{err}"
+        );
+        std::env::set_var("GHOSTWRITER_TIMEOUT_SECS", "soon");
+        let err = load(None).unwrap_err();
+
+        assert!(
+            err.contains("GHOSTWRITER_TIMEOUT_SECS is not a number: soon"),
+            "{err}"
+        );
+    }
+
+    /// N2: an absurd timeout is a startup error that names the cap —
+    /// never a silent clamp — while one day exactly still resolves.
+    #[test]
+    fn timeouts_are_capped_at_one_day() {
+        let cap_ok = build(None, None, None, Some(86_400), Some(60), None)
+            .expect("timeout_secs exactly at the cap must resolve");
+        assert_eq!(cap_ok.timeout, Duration::from_secs(86_400));
+
+        let err = build(None, None, None, Some(86_401), None, None).unwrap_err();
+        assert!(err.contains("timeout_secs must not exceed"), "{err}");
+        assert!(err.contains("86_400") || err.contains("86400"), "{err}");
+        let err = build(None, None, None, None, Some(86_401), None).unwrap_err();
+        assert!(err.contains("idle_timeout_secs must not exceed"), "{err}");
+        assert!(err.contains("86_400") || err.contains("86400"), "{err}");
+
+        // Both at the cap are individually allowed, so an over-long idle
+        // is refused by the idle<timeout rule, not the cap — the two
+        // messages stay distinct.
+        let err = build(None, None, None, Some(86_400), Some(86_400), None).unwrap_err();
+        assert!(err.contains("must be shorter than timeout"), "{err}");
+        assert!(!err.contains("must not exceed"), "{err}");
     }
 }

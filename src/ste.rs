@@ -122,14 +122,16 @@ pub fn dictionary_len() -> usize {
     ENTRIES.len()
 }
 
-/// Byte spans of word tokens (ASCII alphanumerics with internal hyphens,
-/// apostrophes, and underscores).
+/// Char spans of word tokens (ASCII alphanumerics with internal hyphens,
+/// apostrophes, and underscores). Spans index the string's `chars()`, so
+/// callers that hold a `Vec<char>` of the same text can slice it directly —
+/// byte offsets would drift past every multibyte character in the line.
 fn word_spans(s: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut start: Option<usize> = None;
-    for (i, b) in s.bytes().enumerate() {
-        let word_byte = b.is_ascii_alphanumeric() || b == b'-' || b == b'\'' || b == b'_';
-        match (start, word_byte) {
+    for (i, c) in s.chars().enumerate() {
+        let word_char = c.is_ascii_alphanumeric() || c == '-' || c == '\'' || c == '_';
+        match (start, word_char) {
             (None, true) => start = Some(i),
             (Some(s0), false) => {
                 spans.push((s0, i));
@@ -139,15 +141,19 @@ fn word_spans(s: &str) -> Vec<(usize, usize)> {
         }
     }
     if let Some(s0) = start {
-        spans.push((s0, s.len()));
+        spans.push((s0, s.chars().count()));
     }
     spans
 }
 
 /// Mask the regions STE does not govern, in place on a char buffer of
 /// identical length: fenced code blocks, inline code, URLs and URIs, and
-/// path/filename-looking tokens. Byte offsets into the result still index
-/// the original text.
+/// path/filename-looking tokens. Char indices into the result index the
+/// original text's `chars()` 1:1 — masking only replaces characters with
+/// spaces, never removes them.
+///
+/// An unclosed fence exempts the rest of the document BY DESIGN, matching
+/// CommonMark's treatment of an unterminated code fence.
 fn mask(text: &str) -> Vec<char> {
     let mut buf: Vec<char> = text.chars().collect();
     let mut in_fence = false;
@@ -167,15 +173,13 @@ fn mask(text: &str) -> Vec<char> {
             continue;
         }
         let line_chars: Vec<char> = line.chars().collect();
-        let line_str: String = line_chars.iter().collect();
         let mut masked: Vec<char> = line_chars.clone();
 
-        // inline code spans: `...`
-        let bytes: Vec<char> = line_str.chars().collect();
+        // inline code spans: `...` (char indices into the line buffer)
         let mut i = 0;
-        while let Some(rel) = bytes[i..].iter().position(|c| *c == '`') {
+        while let Some(rel) = line_chars[i..].iter().position(|c| *c == '`') {
             let s = i + rel;
-            let Some(rel_e) = bytes[s + 1..].iter().position(|c| *c == '`') else {
+            let Some(rel_e) = line_chars[s + 1..].iter().position(|c| *c == '`') else {
                 break;
             };
             let e = s + 1 + rel_e;
@@ -183,35 +187,58 @@ fn mask(text: &str) -> Vec<char> {
                 *c = ' ';
             }
             i = e + 1;
-            if i >= bytes.len() {
+            if i >= line_chars.len() {
                 break;
             }
         }
 
-        // scheme:// URIs
-        for scheme in [
-            "http://", "https://", "ftp://", "kaibo://", "agent://", "file://",
-        ] {
-            let hay: String = masked.iter().collect();
-            let mut search_from = 0;
-            while let Some(pos) = hay[search_from..].find(scheme) {
-                let pos = search_from + pos;
-                let end = hay[pos..]
-                    .find(char::is_whitespace)
-                    .map(|i| pos + i)
-                    .unwrap_or(hay.len());
-                for (idx, c) in masked.iter_mut().enumerate() {
-                    if idx >= pos && idx < end {
-                        *c = ' ';
-                    }
+        // scheme:// URIs: one left-to-right pass over the masked char
+        // buffer. The scheme is generic — `[A-Za-z][A-Za-z0-9+.-]*`
+        // immediately before `://` — so there is no per-scheme table (and
+        // no private-codename schemes in public source), and no per-hit
+        // haystack rebuild: the old loop re-collected a String for every
+        // scheme and every hit, which measured quadratic on a long single
+        // line (N6). Indices stay char indices of the masked buffer, which
+        // is parallel to the original line's chars (m2).
+        let is_scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
+        let mut k = 0usize;
+        while k < masked.len() {
+            if !masked[k].is_ascii_alphanumeric() {
+                k += 1;
+                continue;
+            }
+            let head = k;
+            while k < masked.len() && is_scheme_char(masked[k]) {
+                k += 1;
+            }
+            let scheme_head = masked[head].is_ascii_alphabetic();
+            if scheme_head
+                && k + 2 < masked.len()
+                && masked[k] == ':'
+                && masked[k + 1] == '/'
+                && masked[k + 2] == '/'
+            {
+                let mut e = k + 3;
+                while e < masked.len() && !masked[e].is_whitespace() {
+                    e += 1;
                 }
-                search_from = end;
+                for c in &mut masked[head..e] {
+                    *c = ' ';
+                }
+                k = e;
             }
         }
 
-        // filenames / paths: runs of path characters that carry a slash or a
-        // dot-extension. Trailing dots stay unmasked so they can still end a
-        // sentence ("...initiate.md." keeps its period).
+        // filenames / paths: runs of path characters, masked only when the
+        // token looks like a path. Trailing dots stay unmasked so they can
+        // still end a sentence ("...initiate.md." keeps its period).
+        //
+        // A bare word joined by a SINGLE slash is not a path — masking it
+        // used to make every slash-containing token invisible to the word
+        // rules, so bias pairs like `master/slave` were never reported.
+        // Such a token reaches the word rules (each side is a separate
+        // word span); it is blanked only with a file extension, two or
+        // more slashes, a backslash, a tilde, or a known directory head.
         let is_path_char =
             |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '\\' | '~');
         let mut j = 0;
@@ -239,9 +266,19 @@ fn mask(text: &str) -> Vec<char> {
                         && ext.chars().all(|c| c.is_ascii_alphabetic())
                 })
                 .unwrap_or(false);
-            if (tok.contains('/') || tok.contains('\\') || dot_ext)
-                && tok.chars().any(|c| c.is_ascii_alphanumeric())
-            {
+            let slashes = tok.matches('/').count();
+            let head = tok
+                .trim_start_matches('/')
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let looks_like_path = dot_ext
+                || tok.contains('\\')
+                || tok.contains('~')
+                || slashes >= 2
+                || (slashes == 1 && DIR_HEADS.contains(&head.as_str()));
+            if looks_like_path && tok.chars().any(|c| c.is_ascii_alphanumeric()) {
                 for c in &mut masked[s2..e2] {
                     *c = ' ';
                 }
@@ -266,6 +303,15 @@ fn clip(s: &str) -> String {
         s.to_string()
     }
 }
+
+/// Leading directory names that mark a single-slash token as a path even
+/// without an extension ("src/main", "/etc/passwd"). Deliberately boring:
+/// only names a running token cannot plausibly be as prose — the heads of
+/// bias pairs like `master/slave` are absent, so those reach the word rules.
+const DIR_HEADS: &[&str] = &[
+    "bin", "dev", "doc", "docs", "etc", "home", "lib", "libs", "opt", "sbin", "src", "srv", "tmp",
+    "usr", "var",
+];
 
 const LATIN: &[(&str, &str)] = &[
     ("etc.", "use and so on"),
@@ -419,21 +465,29 @@ fn ste_words(s: &str) -> usize {
     count
 }
 
-fn find_word(hay: &str, needle: &str) -> Option<usize> {
-    hay.match_indices(needle).find_map(|(i, _)| {
-        let before_ok = i == 0
-            || !hay[..i]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c.is_ascii_alphanumeric());
-        let after = hay[i + needle.len()..].chars().next();
+/// First occurrence of the (ASCII) `needle` in the lowercased masked-line
+/// char buffer, aligned to word boundaries: an alphanumeric neighbour on
+/// either side disqualifies the match, while `-` and `/` inside a needle
+/// stay word characters (see [`WordRule`]). Returns a CHAR index — the
+/// buffer is built with ASCII-only lowering, so positions map 1:1 onto the
+/// masked line and the original line.
+fn find_word(hay: &[char], needle: &str) -> Option<usize> {
+    let needle: Vec<char> = needle.chars().collect();
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    for i in 0..=hay.len() - needle.len() {
+        if hay[i..i + needle.len()] != needle[..] {
+            continue;
+        }
+        let before_ok = i == 0 || !hay[i - 1].is_ascii_alphanumeric();
+        let after = hay.get(i + needle.len()).copied();
         let after_ok = !after.is_some_and(|c| c.is_ascii_alphanumeric());
         if before_ok && after_ok {
-            Some(i)
-        } else {
-            None
+            return Some(i);
         }
-    })
+    }
+    None
 }
 
 /// Join a paragraph's masked lines, split into sentences, and report each
@@ -457,7 +511,9 @@ fn collect_sentences(para: &[(usize, String)]) -> Vec<(usize, String)> {
     let mut i = 0usize;
     while i < chars.len() {
         if matches!(chars[i], '.' | '!' | '?') {
-            let prev_alnum = i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == ')');
+            // N5: any script counts — a terminator after é or 漢 ends the
+            // sentence just like one after an ASCII letter.
+            let prev_alnum = i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == ')');
             let body: String = chars[start..i].iter().collect();
             let not_step_label = body.trim().chars().count() > 1
                 && !body.trim().chars().next().is_some_and(|c| {
@@ -563,39 +619,21 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
         let lineno = idx + 1;
         let oline = orig_lines.get(idx).copied().unwrap_or("");
         let ochars: Vec<char> = oline.chars().collect();
+        // One lowercased char buffer per masked line, ASCII-only lowering:
+        // length-preserving BY CONSTRUCTION, so a position maps 1:1 between
+        // hay, the masked line, and the original line. The old code matched
+        // in byte space over `mline.to_lowercase()` and indexed char
+        // buffers, which shifted every position after any non-ASCII
+        // character and silently dropped (or mis-quoted) findings.
+        let mchars: Vec<char> = mline.chars().collect();
+        let hay: Vec<char> = mchars.iter().map(|c| c.to_ascii_lowercase()).collect();
         if rules.dictionary {
             for (s, e) in word_spans(mline) {
-                // word_spans yields byte spans; the ASCII-only token boundary
-                // makes byte and char offsets agree for alnum tokens, but the
-                // line may hold multibyte text before the token — recompute in
-                // char space over the masked line.
-                let mchars: Vec<char> = mline.chars().collect();
-                let mut char_span = (s, e);
-                if !mline.is_ascii() {
-                    let mut cs = None;
-                    let mut ce = None;
-                    let mut count = 0;
-                    for (k, c) in mline.char_indices() {
-                        if k == s {
-                            cs = Some(count);
-                        }
-                        count += c.len_utf8();
-                        if k + c.len_utf8() == e {
-                            ce = Some(count);
-                        }
-                    }
-                    if let (Some(cs), Some(ce)) = (cs, ce) {
-                        char_span = (cs, ce);
-                    }
-                }
-                let (cs, ce) = char_span;
-                if ce > mchars.len() {
-                    continue;
-                }
-                let tok: String = mchars[cs..ce].iter().collect();
-                let key = tok.trim_matches('\'').to_lowercase();
+                // word_spans returns char spans; slice the char buffer.
+                let tok: String = mchars[s..e].iter().collect();
+                let key = tok.trim_matches('\'').to_ascii_lowercase();
                 if let Some(entry) = FORMS.get(&key) {
-                    let quote: String = ochars[cs..ce.min(ochars.len())].iter().collect();
+                    let quote: String = ochars[s..e.min(ochars.len())].iter().collect();
                     findings.push(Finding {
                         line: lineno,
                         quote: clip(&quote),
@@ -609,7 +647,6 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
                 }
             }
         }
-        let hay = mline.to_lowercase();
         if rules.latin {
             for (needle, fix) in LATIN {
                 if let Some(pos) = find_word(&hay, needle) {
@@ -644,7 +681,7 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
                 });
             }
         }
-        if rules.semicolon && hay.contains(';') {
+        if rules.semicolon && hay.contains(&';') {
             findings.push(Finding {
                 line: lineno,
                 quote: clip(oline),
@@ -652,7 +689,7 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
                 fix: "write two sentences; the semicolon is not approved in STE".into(),
             });
         }
-        if rules.exclamation && hay.contains('!') {
+        if rules.exclamation && hay.contains(&'!') {
             findings.push(Finding {
                 line: lineno,
                 quote: clip(oline),
@@ -705,16 +742,12 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
     findings
 }
 
-/// The original-line text under a needle found at char `pos` of the
-/// lowercased masked line.
+/// The original-line text under a needle found at char index `pos` of the
+/// lowercased masked char buffer (positions map 1:1 back to the original
+/// line: ASCII-only lowering and space-masking are length-preserving).
 fn quote_at(ochars: &[char], pos: usize, needle: &str) -> String {
-    let end = pos + needle.chars().count();
-    ochars
-        .iter()
-        .enumerate()
-        .filter(|(k, _)| *k >= pos && *k < end)
-        .map(|(_, c)| *c)
-        .collect()
+    let end = (pos + needle.chars().count()).min(ochars.len());
+    ochars[pos..end].iter().collect()
 }
 
 #[cfg(test)]
@@ -755,6 +788,53 @@ mod tests {
             .filter(|x| x.quote.contains("utilize") || x.quote.contains("initiate"))
             .collect();
         assert!(leaked.is_empty(), "code was flagged: {leaked:?}");
+    }
+
+    /// N4: a bias pair written with a SINGLE slash must reach the word
+    /// rules; only tokens that look like paths get masked. The pre-fix
+    /// predicate blanked every slash-containing token, so `master/slave`
+    /// was invisible to the mechanical checker (a styles test pinned that
+    /// blindness until 2026-10-02).
+    #[test]
+    fn slash_bias_word_reaches_rules_while_real_paths_stay_masked() {
+        let text = "Open docs/style.css in the src/main tree, then fix the master/slave naming.";
+        let m: String = mask(text).into_iter().collect();
+        assert!(m.contains("master/slave"), "slash pair was masked: {m:?}");
+        assert!(!m.contains("style.css"), "extension path survived: {m:?}");
+        assert!(!m.contains("src/main"), "directory path survived: {m:?}");
+        let f = check_with(text, &crate::styles::MICROSOFT_RULES);
+        let bias: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "microsoft-bias")
+            .map(|x| x.quote.as_str())
+            .collect();
+        assert_eq!(bias, ["master", "slave"], "{f:?}");
+        assert!(
+            f.iter().all(|x| {
+                !x.quote.contains("css")
+                    && !x.quote.contains("style")
+                    && !x.quote.contains("src")
+                    && !x.quote.contains("main")
+            }),
+            "path content leaked into findings: {f:?}"
+        );
+    }
+
+    /// N4 companion: a single-slash token that is not a registered needle
+    /// (a ratio, a date-shaped run) now reaches the rules unmasked and
+    /// must still match nothing — no masking hid a rule hit that fires
+    /// spuriously once the bare word passes through.
+    #[test]
+    fn single_slash_nonwords_match_no_rule() {
+        let text = "Set the ratio to 12/17 on the release dated 2026-10-03 for 3/4 of the plan.";
+        let m: String = mask(text).into_iter().collect();
+        assert!(m.contains("12/17"), "ratio was masked: {m:?}");
+        assert!(m.contains("3/4"), "fraction was masked: {m:?}");
+        let f = check_with(text, &crate::styles::MICROSOFT_RULES);
+        assert!(
+            f.is_empty(),
+            "spurious finding on a single-slash token: {f:?}"
+        );
     }
 
     #[test]
@@ -838,5 +918,177 @@ mod tests {
             },
         ];
         assert_eq!(check(text), expected);
+    }
+
+    // --- Non-ASCII finding correctness (M1 / m1 / m2 / N5 / N6) ------------
+    //
+    // These pin the char-space rewrite of the engine. The pre-fix engine
+    // matched in byte space and indexed char buffers, so any line holding a
+    // multibyte character before a token silently lost findings (M1),
+    // mis-sliced quotes (m1), or mis-blanked the window after a URL (m2).
+
+    /// M1: the same sentence must report the same dictionary violations
+    /// whether or not the line also carries a non-ASCII character.
+    #[test]
+    fn non_ascii_line_still_reports_dictionary_words() {
+        // ASCII premise: both tokens are in the dictionary.
+        let ascii = check("The operator utilizes the gauge.");
+        let quotes: Vec<&str> = ascii.iter().map(|x| x.quote.as_str()).collect();
+        assert!(quotes.contains(&"utilizes"), "{quotes:?}");
+        assert!(quotes.contains(&"gauge"), "{quotes:?}");
+        // Same sentence, one em dash earlier in the line: the findings must
+        // survive. Pre-fix this returned zero findings and the handler
+        // reported clean:true.
+        let dashed = check("The operator \u{2014} utilizes the gauge.");
+        let quotes: Vec<&str> = dashed.iter().map(|x| x.quote.as_str()).collect();
+        assert!(
+            quotes.contains(&"utilizes"),
+            "em dash lost the dictionary findings: {quotes:?}"
+        );
+        assert!(
+            quotes.contains(&"gauge"),
+            "em dash lost the dictionary findings: {quotes:?}"
+        );
+    }
+
+    /// M1: tokens after a multibyte character must keep being reported,
+    /// with their original spelling quoted verbatim.
+    #[test]
+    fn findings_survive_after_a_multibyte_char() {
+        let f = check("Utilize the pump \u{2014} initiate the cycle, then utilize the seal.");
+        let quotes: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "ste-vocab")
+            .map(|x| x.quote.as_str())
+            .collect();
+        assert!(quotes.contains(&"Utilize"), "{quotes:?}");
+        assert!(quotes.contains(&"initiate"), "{quotes:?}");
+        assert!(
+            quotes.contains(&"utilize"),
+            "only the pre-dash tokens survived: {quotes:?}"
+        );
+    }
+
+    /// m1: the needle position from the matcher indexes chars, not bytes,
+    /// so the quote under a non-ASCII line is the needle itself.
+    #[test]
+    fn quote_at_indexes_non_ascii_lines_in_chars() {
+        let f = check("Caf\u{e9}: check the seal, e.g. cold.");
+        let latin: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "ste-latin")
+            .map(|x| x.quote.as_str())
+            .collect();
+        assert_eq!(latin, vec!["e.g."], "{f:?}");
+    }
+
+    /// m2: the URL blanking window must be computed in char space over the
+    /// masked buffer. On a line with a multibyte char before the URL, the
+    /// pre-fix window (byte offsets of a rebuilt String applied as char
+    /// indices) left the URL head visible and clipped the word after the
+    /// URL, killing the `utilize` finding.
+    #[test]
+    fn url_masking_blanks_only_the_url_on_non_ascii_lines() {
+        let text = "Le caf\u{e9}: see https://example.com/a/b then utilize the seal.";
+        let m: String = mask(text).into_iter().collect();
+        assert!(!m.contains("https"), "url head survived masking: {m:?}");
+        assert!(!m.contains("example"), "url body survived masking: {m:?}");
+        assert!(
+            m.contains(" then utilize the seal."),
+            "word after the url was clipped: {m:?}"
+        );
+        let f = check(text);
+        assert!(
+            f.iter()
+                .any(|x| x.rule == "ste-vocab" && x.quote == "utilize"),
+            "utilize after a url on a non-ascii line lost: {f:?}"
+        );
+    }
+
+    /// N5: a sentence terminator counts when the character before it is
+    /// alphanumeric in any script, not only ASCII.
+    #[test]
+    fn sentence_split_accepts_non_ascii_before_terminator() {
+        // Discriminating fixture: the terminator follows 'e'-with-acute.
+        // Pre-fix (ASCII-only prev-alnum) the whole two-sentence run merged
+        // into a single "sentence".
+        let para = vec![(
+            1usize,
+            "Le caf\u{e9} est ferm\u{e9}. The staff utilize the register.".to_string(),
+        )];
+        let sents: Vec<String> = collect_sentences(&para)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect();
+        assert_eq!(
+            sents,
+            vec![
+                "Le caf\u{e9} est ferm\u{e9}.",
+                "The staff utilize the register."
+            ],
+            "{sents:?}"
+        );
+        // The plain-ASCII neighbour keeps splitting as before.
+        let para = vec![(
+            1usize,
+            "Caf\u{e9} is closed. The staff utilize the register.".to_string(),
+        )];
+        let sents: Vec<String> = collect_sentences(&para)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect();
+        assert_eq!(
+            sents,
+            vec!["Caf\u{e9} is closed.", "The staff utilize the register."],
+            "{sents:?}"
+        );
+    }
+
+    /// Hostile inputs must not panic. `check` is pure (no IO of any kind in
+    /// this module), so purity holds by construction; these exercise the
+    /// shapes the reviewer probed: CRLF, embedded NUL/ESC, lone curly
+    /// quotes, an unclosed fence, empty text, a 100k-char single line.
+    #[test]
+    fn hostile_inputs_never_panic() {
+        check("");
+        check("\r\nThe operator utilizes\r\n the gauge.\r\n");
+        check("A\u{0}B\u{1b}C utilize the seal.");
+        check("The \u{201c}operator\u{201d} utilize the gauge.");
+        // An unclosed fence exempts the rest of the document BY DESIGN,
+        // matching CommonMark's treatment of an unterminated code fence.
+        assert!(
+            check("Unclosed fence\n```\nutilize initiate").is_empty(),
+            "unclosed fence must exempt to EOF"
+        );
+        let big = "utilize ".repeat(12_500); // 100k chars, one line
+        assert_eq!(big.chars().count(), 100_000);
+        let f = check(&big);
+        assert!(
+            f.iter()
+                .any(|x| x.rule == "ste-vocab" && x.quote == "utilize"),
+            "100k-char line lost its findings"
+        );
+    }
+
+    /// N6 perf smoke (NOT a benchmark): the old per-scheme loop rebuilt the
+    /// haystack String per hit, which measured 440 ms for a 58 KB single
+    /// line. The single left-to-right char pass must finish in well under a
+    /// second — the bound is deliberately generous so CI never flakes.
+    #[test]
+    fn url_heavy_single_line_perf_smoke() {
+        use std::time::Instant;
+        let unit = "deploy http://host.example.invalid/a/b/c then configure the widget ";
+        let line = unit.repeat(900); // ~59 KB single line, 900 http:// tokens
+        let started = Instant::now();
+        let findings = check(&line);
+        let elapsed = started.elapsed();
+        assert!(
+            findings.iter().all(|x| !x.quote.contains("http")),
+            "url content leaked into findings: {findings:?}"
+        );
+        assert!(
+            elapsed.as_secs() < 1,
+            "58 KB url-heavy single line took {elapsed:?} — masking regressed to quadratic"
+        );
     }
 }
