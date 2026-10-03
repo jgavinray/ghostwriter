@@ -1,9 +1,11 @@
-//! Deterministic ASD-STE100 checks — the verifiable half of the STE
-//! integration. The prompt-side rules live in `prompts::STE_GUIDE`; this
-//! module ships the part a small model must not be trusted with: the
-//! controlled-dictionary lookups and the mechanical rules (no semicolons,
-//! no contractions, sentence-length caps) that `ste_check` reports without
-//! a model call.
+//! Deterministic mechanical checks for the registered writing standards —
+//! the verifiable half that `style_check` reports without a model call. The
+//! prompt-side rules live in `prompts`; the registry that binds a style to
+//! its guide and its [`Rules`] lives in `crate::styles`. This module ships
+//! the part a small model must not be trusted with: dictionary lookups and
+//! the line-level rules (semicolons, contractions, Latin abbreviations,
+//! length caps) run through one engine that takes its policy from a
+//! [`Rules`] set.
 //!
 //! The data file `assets/ste100-unapproved.tsv` holds one row per
 //! unapproved general word: word, part of speech, approved replacement
@@ -24,8 +26,10 @@ pub struct Finding {
     pub line: usize,
     /// The offending text, trimmed and clipped to one short quote.
     pub quote: String,
-    /// Stable rule id, e.g. `ste-vocab`, `ste-semicolon`.
-    pub rule: &'static str,
+    /// Stable rule id: the engine's prefix plus the primitive (`ste-vocab`,
+    /// `google-latin`, `microsoft-exclamation`) or a full id from a
+    /// style's own word table (`google-tone`, `microsoft-bias`).
+    pub rule: String,
     /// What to use instead, in plain words.
     pub fix: String,
 }
@@ -490,8 +494,64 @@ fn line_for(bounds: &[(usize, usize)], char_pos: usize) -> usize {
     line
 }
 
+/// Which mechanical primitives a registered style runs, and which extra
+/// word rules it bans. Everything matches at word boundaries or line level
+/// over masked prose, so code, inline code, paths, and URLs stay exempt
+/// under every style. A rule a style does not enable is not reported —
+/// what the checker stays silent on remains the model's judgment.
+#[derive(Debug)]
+pub struct Rules {
+    /// Prefix for the engine's own rule ids: `ste`, `google`, `microsoft`.
+    pub prefix: &'static str,
+    /// The ASD-STE100 unapproved-word dictionary lookup.
+    pub dictionary: bool,
+    /// Latin abbreviations (`etc.`, `e.g.`, `i.e.` ...).
+    pub latin: bool,
+    /// Contractions, with the spelled-out form as the fix.
+    pub contractions: bool,
+    /// Semicolons: one finding per line.
+    pub semicolon: bool,
+    /// Exclamation marks: one finding per line.
+    pub exclamation: bool,
+    /// The ASD-STE100 sentence-length caps (20 / 25).
+    pub length_caps: bool,
+    /// Style-specific banned needles, matched against the lowercased line.
+    pub words: &'static [WordRule],
+}
+
+/// One banned word or phrase from a style's own table.
+#[derive(Debug)]
+pub struct WordRule {
+    /// Lowercased needle matched at word boundaries; may contain spaces,
+    /// `/`, or `-` (those count as word characters here).
+    pub needle: &'static str,
+    /// Full stable rule id, e.g. `google-tone`.
+    pub rule: &'static str,
+    /// What to use instead, in plain words.
+    pub fix: &'static str,
+}
+
+/// The ASD-STE100 mechanical set: the verifiable half of the standard.
+pub static STE_RULES: Rules = Rules {
+    prefix: "ste",
+    dictionary: true,
+    latin: true,
+    contractions: true,
+    semicolon: true,
+    exclamation: false,
+    length_caps: true,
+    words: &[],
+};
+
 /// Run every deterministic STE check over `text`.
 pub fn check(text: &str) -> Vec<Finding> {
+    check_with(text, &STE_RULES)
+}
+
+/// Run one registered style's mechanical rules over `text`. Pure: the
+/// findings are a function of the text and the rule set alone, so tests
+/// can pin exact findings per style.
+pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
     let mut findings = Vec::new();
     let masked = mask(text);
     let masked_text: String = masked.iter().collect();
@@ -503,132 +563,158 @@ pub fn check(text: &str) -> Vec<Finding> {
         let lineno = idx + 1;
         let oline = orig_lines.get(idx).copied().unwrap_or("");
         let ochars: Vec<char> = oline.chars().collect();
-        for (s, e) in word_spans(mline) {
-            // word_spans yields byte spans; the ASCII-only token boundary
-            // makes byte and char offsets agree for alnum tokens, but the
-            // line may hold multibyte text before the token — recompute in
-            // char space over the masked line.
-            let mchars: Vec<char> = mline.chars().collect();
-            let mut char_span = (s, e);
-            if !mline.is_ascii() {
-                let mut cs = None;
-                let mut ce = None;
-                let mut count = 0;
-                for (k, c) in mline.char_indices() {
-                    if k == s {
-                        cs = Some(count);
+        if rules.dictionary {
+            for (s, e) in word_spans(mline) {
+                // word_spans yields byte spans; the ASCII-only token boundary
+                // makes byte and char offsets agree for alnum tokens, but the
+                // line may hold multibyte text before the token — recompute in
+                // char space over the masked line.
+                let mchars: Vec<char> = mline.chars().collect();
+                let mut char_span = (s, e);
+                if !mline.is_ascii() {
+                    let mut cs = None;
+                    let mut ce = None;
+                    let mut count = 0;
+                    for (k, c) in mline.char_indices() {
+                        if k == s {
+                            cs = Some(count);
+                        }
+                        count += c.len_utf8();
+                        if k + c.len_utf8() == e {
+                            ce = Some(count);
+                        }
                     }
-                    count += c.len_utf8();
-                    if k + c.len_utf8() == e {
-                        ce = Some(count);
+                    if let (Some(cs), Some(ce)) = (cs, ce) {
+                        char_span = (cs, ce);
                     }
                 }
-                if let (Some(cs), Some(ce)) = (cs, ce) {
-                    char_span = (cs, ce);
+                let (cs, ce) = char_span;
+                if ce > mchars.len() {
+                    continue;
                 }
-            }
-            let (cs, ce) = char_span;
-            if ce > mchars.len() {
-                continue;
-            }
-            let tok: String = mchars[cs..ce].iter().collect();
-            let key = tok.trim_matches('\'').to_lowercase();
-            if let Some(entry) = FORMS.get(&key) {
-                let quote: String = ochars[cs..ce.min(ochars.len())].iter().collect();
-                findings.push(Finding {
-                    line: lineno,
-                    quote: clip(&quote),
-                    rule: "ste-vocab",
-                    fix: format!(
-                        "use {} (unapproved {} word: {key})",
-                        repl_display(&entry.repl),
-                        entry.pos
-                    ),
-                });
+                let tok: String = mchars[cs..ce].iter().collect();
+                let key = tok.trim_matches('\'').to_lowercase();
+                if let Some(entry) = FORMS.get(&key) {
+                    let quote: String = ochars[cs..ce.min(ochars.len())].iter().collect();
+                    findings.push(Finding {
+                        line: lineno,
+                        quote: clip(&quote),
+                        rule: format!("{}-vocab", rules.prefix),
+                        fix: format!(
+                            "use {} (unapproved {} word: {key})",
+                            repl_display(&entry.repl),
+                            entry.pos
+                        ),
+                    });
+                }
             }
         }
         let hay = mline.to_lowercase();
-        for (needle, fix) in LATIN {
-            if let Some(pos) = find_word(&hay, needle) {
-                let quote: String = ochars
-                    .iter()
-                    .enumerate()
-                    .filter(|(k, _)| *k >= pos && *k < pos + needle.chars().count())
-                    .map(|(_, c)| *c)
-                    .collect();
+        if rules.latin {
+            for (needle, fix) in LATIN {
+                if let Some(pos) = find_word(&hay, needle) {
+                    findings.push(Finding {
+                        line: lineno,
+                        quote: clip(&quote_at(&ochars, pos, needle)),
+                        rule: format!("{}-latin", rules.prefix),
+                        fix: (*fix).to_string(),
+                    });
+                }
+            }
+        }
+        if rules.contractions {
+            for (needle, fix) in CONTRACTIONS {
+                if let Some(pos) = find_word(&hay, needle) {
+                    findings.push(Finding {
+                        line: lineno,
+                        quote: clip(&quote_at(&ochars, pos, needle)),
+                        rule: format!("{}-contraction", rules.prefix),
+                        fix: (*fix).to_string(),
+                    });
+                }
+            }
+        }
+        for w in rules.words {
+            if let Some(pos) = find_word(&hay, w.needle) {
                 findings.push(Finding {
                     line: lineno,
-                    quote: clip(&quote),
-                    rule: "ste-latin",
-                    fix: (*fix).to_string(),
+                    quote: clip(&quote_at(&ochars, pos, w.needle)),
+                    rule: w.rule.to_string(),
+                    fix: w.fix.to_string(),
                 });
             }
         }
-        for (needle, fix) in CONTRACTIONS {
-            if let Some(pos) = find_word(&hay, needle) {
-                let quote: String = ochars
-                    .iter()
-                    .enumerate()
-                    .filter(|(k, _)| *k >= pos && *k < pos + needle.chars().count())
-                    .map(|(_, c)| *c)
-                    .collect();
-                findings.push(Finding {
-                    line: lineno,
-                    quote: clip(&quote),
-                    rule: "ste-contraction",
-                    fix: (*fix).to_string(),
-                });
-            }
-        }
-        if hay.contains(';') {
+        if rules.semicolon && hay.contains(';') {
             findings.push(Finding {
                 line: lineno,
                 quote: clip(oline),
-                rule: "ste-semicolon",
+                rule: format!("{}-semicolon", rules.prefix),
                 fix: "write two sentences; the semicolon is not approved in STE".into(),
+            });
+        }
+        if rules.exclamation && hay.contains('!') {
+            findings.push(Finding {
+                line: lineno,
+                quote: clip(oline),
+                rule: format!("{}-exclamation", rules.prefix),
+                fix: "remove the exclamation mark and state the point plainly".into(),
             });
         }
     }
 
-    // Sentence lengths over paragraph runs of masked prose.
-    let mut para: Vec<(usize, String)> = Vec::new();
-    let flush = |para: &mut Vec<(usize, String)>, findings: &mut Vec<Finding>| {
-        for (line, sentence) in collect_sentences(para) {
-            let words = ste_words(&sentence);
-            let first = sentence
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .trim_matches(|c: char| !c.is_alphanumeric());
-            let limit = if first.is_empty() || subject_initial(first) {
-                MAX_DESCRIBE_WORDS
-            } else {
-                MAX_INSTRUCTION_WORDS
-            };
-            if words > limit {
-                findings.push(Finding {
-                    line,
-                    quote: clip(&sentence),
-                    rule: "ste-sentence-length",
-                    fix: format!("split the sentence: {words} words, maximum is {limit}"),
-                });
+    if rules.length_caps {
+        // Sentence lengths over paragraph runs of masked prose.
+        let mut para: Vec<(usize, String)> = Vec::new();
+        let flush = |para: &mut Vec<(usize, String)>, findings: &mut Vec<Finding>| {
+            for (line, sentence) in collect_sentences(para) {
+                let words = ste_words(&sentence);
+                let first = sentence
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(|c: char| !c.is_alphanumeric());
+                let limit = if first.is_empty() || subject_initial(first) {
+                    MAX_DESCRIBE_WORDS
+                } else {
+                    MAX_INSTRUCTION_WORDS
+                };
+                if words > limit {
+                    findings.push(Finding {
+                        line,
+                        quote: clip(&sentence),
+                        rule: format!("{}-sentence-length", rules.prefix),
+                        fix: format!("split the sentence: {words} words, maximum is {limit}"),
+                    });
+                }
             }
+            para.clear();
+        };
+        for (idx, mline) in masked_lines.iter().enumerate() {
+            let t = mline.trim();
+            if t.is_empty() || t.starts_with('#') {
+                flush(&mut para, &mut findings);
+                continue;
+            }
+            para.push((idx + 1, mline.to_string()));
         }
-        para.clear();
-    };
-    for (idx, mline) in masked_lines.iter().enumerate() {
-        let t = mline.trim();
-        if t.is_empty() || t.starts_with('#') {
-            flush(&mut para, &mut findings);
-            continue;
-        }
-        para.push((idx + 1, mline.to_string()));
+        flush(&mut para, &mut findings);
     }
-    flush(&mut para, &mut findings);
 
-    findings.sort_by_key(|f| (f.line, f.rule, f.quote.clone()));
-    findings.dedup_by_key(|f| (f.line, f.rule, f.quote.clone()));
+    findings.sort_by_key(|f| (f.line, f.rule.clone(), f.quote.clone()));
+    findings.dedup_by_key(|f| (f.line, f.rule.clone(), f.quote.clone()));
     findings
+}
+
+/// The original-line text under a needle found at char `pos` of the
+/// lowercased masked line.
+fn quote_at(ochars: &[char], pos: usize, needle: &str) -> String {
+    let end = pos + needle.chars().count();
+    ochars
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| *k >= pos && *k < end)
+        .map(|(_, c)| *c)
+        .collect()
 }
 
 #[cfg(test)]
@@ -698,5 +784,59 @@ mod tests {
     fn word_count_groups_per_spec() {
         // numbers, hyphenated pairs, and parenthesized runs each count as one
         assert_eq!(ste_words("Set the torque to 12 N-m (9 lbf-ft) now."), 8);
+    }
+    /// The whole report is contractual for STE: rule ids, quotes, fixes,
+    /// and the (line, rule, quote) emission order. A change to the engine's
+    /// sort key, masking, or fix wording breaks this test even when the
+    /// looser membership tests above stay green.
+    #[test]
+    fn ste_report_is_pinned_end_to_end() {
+        let text = "Do not utilize the valve; it doesn't seal, e.g. when cold.\nCheck the seal, then initiate the pump.";
+        let expected = vec![
+            Finding {
+                line: 1,
+                quote: "doesn't".into(),
+                rule: "ste-contraction".into(),
+                fix: "does not".into(),
+            },
+            Finding {
+                line: 1,
+                quote: "e.g.".into(),
+                rule: "ste-latin".into(),
+                fix: "use for example".into(),
+            },
+            Finding {
+                line: 1,
+                quote: "Do not utilize the valve; it doesn't seal, e.g. when cold.".into(),
+                rule: "ste-semicolon".into(),
+                fix: "write two sentences; the semicolon is not approved in STE".into(),
+            },
+            Finding {
+                line: 1,
+                quote: "utilize".into(),
+                rule: "ste-vocab".into(),
+                fix: "use use (unapproved v word: utilize)".into(),
+            },
+            Finding {
+                line: 2,
+                quote: "Check".into(),
+                rule: "ste-vocab".into(),
+                fix: "use make / sure / measure / examine / check (unapproved v word: check)"
+                    .into(),
+            },
+            Finding {
+                line: 2,
+                quote: "initiate".into(),
+                rule: "ste-vocab".into(),
+                fix: "use start (unapproved v word: initiate)".into(),
+            },
+            Finding {
+                line: 2,
+                quote: "pump".into(),
+                rule: "ste-vocab".into(),
+                fix: "use pump (unapproved v word: pump)".into(),
+            },
+        ];
+        assert_eq!(check(text), expected);
     }
 }

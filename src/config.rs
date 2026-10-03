@@ -10,10 +10,10 @@
 //!    `--config` that does not exist is a startup error.
 //! 3. Environment: `GHOSTWRITER_BASE_URL`, `GHOSTWRITER_MODEL`,
 //!    `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`,
-//!    `GHOSTWRITER_IDLE_TIMEOUT_SECS`, so the mcp.json `env` block or a
-//!    systemd `Environment=` can override the file. `timeout_secs` bounds
-//!    one whole generation, queueing included (a busy engine holds a
-//!    queued request in total silence until the first token);
+//!    `GHOSTWRITER_IDLE_TIMEOUT_SECS`, `GHOSTWRITER_STYLE`, so the mcp.json
+//!    `env` block or a systemd `Environment=` can override the file.
+//!    `timeout_secs` bounds one whole generation, queueing included (a busy
+//!    engine holds a queued request in total silence until the first token);
 //!    `idle_timeout_secs` kills a stream only after it began emitting and
 //!    then went silent.
 
@@ -51,6 +51,11 @@ pub struct Config {
     pub temperature: f32,
     pub timeout: Duration,
     pub idle_timeout: Duration,
+    /// Server-side default for the per-call `style` argument: the id of a
+    /// registered standard (`crate::styles`), validated at startup, or
+    /// `none` for the house style alone. A call that omits `style` gets
+    /// this; an explicit `style` from the caller always wins.
+    pub style: String,
 }
 
 /// The config-file schema. Every field is optional — a file may set only
@@ -64,6 +69,10 @@ struct FileConfig {
     temperature: Option<f32>,
     timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
+    style: Option<String>,
+    /// Retired: replaced by `style`. Declared so the key reaches a
+    /// helpful startup message instead of the unknown-key refusal.
+    ste: Option<bool>,
 }
 
 /// The single config-file location, identical on macOS and Linux:
@@ -77,6 +86,13 @@ fn default_config_path() -> Option<PathBuf> {
 /// Resolve the configuration: defaults, overlaid by the config file, then
 /// by the environment. `explicit` is the `--config` path when given.
 pub fn load(explicit: Option<&Path>) -> Result<Config, String> {
+    if env_present("GHOSTWRITER_STE") {
+        return Err(format!(
+            "GHOSTWRITER_STE is retired: `style` replaced `ste` — set \
+             GHOSTWRITER_STYLE to one of: {} (the old true maps to \"ste\")",
+            crate::styles::usage()
+        ));
+    }
     let path = explicit.map(Path::to_path_buf).or_else(default_config_path);
     let file = match &path {
         Some(path) => match std::fs::read_to_string(path) {
@@ -100,12 +116,20 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, String> {
         None => None,
     };
     let file = file.unwrap_or_default();
+    if file.ste.is_some() {
+        return Err(format!(
+            "the config key `ste` was replaced by `style`: set style = \\\"ste\\\" \
+             to keep ASD-STE100 as the default (valid: {})",
+            crate::styles::usage()
+        ));
+    }
     build(
         env_str("GHOSTWRITER_BASE_URL").or(file.base_url),
         env_str("GHOSTWRITER_MODEL").or(file.model),
         env_f32("GHOSTWRITER_TEMPERATURE")?.or(file.temperature),
         env_u64("GHOSTWRITER_TIMEOUT_SECS")?.or(file.timeout_secs),
         env_u64("GHOSTWRITER_IDLE_TIMEOUT_SECS")?.or(file.idle_timeout_secs),
+        env_str("GHOSTWRITER_STYLE").or(file.style),
     )
 }
 
@@ -116,6 +140,7 @@ fn build(
     temperature: Option<f32>,
     timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
+    style: Option<String>,
 ) -> Result<Config, String> {
     let base_url = base_url
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
@@ -148,12 +173,25 @@ fn build(
              the idle kill would never fire before the overall deadline"
         ));
     }
+    // The default standard must name a registered style: a typo dies at
+    // startup, not silently in every prompt at serve time.
+    let style = style
+        .unwrap_or_else(|| crate::styles::NONE_ID.to_string())
+        .trim()
+        .to_ascii_lowercase();
+    if style != crate::styles::NONE_ID && crate::styles::lookup(&style).is_none() {
+        return Err(format!(
+            "unknown style {style:?}; expected one of: {}",
+            crate::styles::usage()
+        ));
+    }
     Ok(Config {
         base_url,
         model,
         temperature: temperature.clamp(0.0, 2.0),
         timeout,
         idle_timeout,
+        style,
     })
 }
 
@@ -184,18 +222,23 @@ fn env_u64(key: &str) -> Result<Option<u64>, String> {
     }
 }
 
+fn env_present(key: &str) -> bool {
+    std::env::var_os(key).is_some_and(|v| !v.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn defaults_resolve() {
-        let c = build(None, None, None, None, None).unwrap();
+        let c = build(None, None, None, None, None, None).unwrap();
         assert_eq!(c.base_url, "http://hyper03:8002/v1");
         assert_eq!(c.model, "hemmingway-1");
         assert_eq!(c.temperature, 0.3);
         assert_eq!(c.timeout, Duration::from_secs(900));
         assert_eq!(c.idle_timeout, Duration::from_secs(60));
+        assert_eq!(c.style, "none");
     }
 
     #[test]
@@ -206,25 +249,27 @@ mod tests {
             Some(9.0),
             Some(2),
             Some(0),
+            Some("STE".into()),
         )
         .unwrap();
         assert_eq!(c.base_url, "http://box:9/v1");
         assert_eq!(c.temperature, 2.0); // clamped into 0.0..2.0
         assert_eq!(c.timeout, Duration::from_secs(2));
         assert_eq!(c.idle_timeout, Duration::from_secs(1)); // floored at 1
-        assert!(build(Some("ftp://box".into()), None, None, None, None).is_err());
-        assert!(build(None, Some(String::new()), None, None, None).is_err());
-        assert!(build(None, None, Some(f32::NAN), None, None).is_err());
-        assert!(build(None, None, Some(f32::INFINITY), None, None).is_err());
+        assert_eq!(c.style, "ste"); // normalized to the registered id
+        assert!(build(Some("ftp://box".into()), None, None, None, None, None).is_err());
+        assert!(build(None, Some(String::new()), None, None, None, None).is_err());
+        assert!(build(None, None, Some(f32::NAN), None, None, None).is_err());
+        assert!(build(None, None, Some(f32::INFINITY), None, None, None).is_err());
     }
 
     /// An idle kill that can never fire before the overall deadline is a
     /// dead knob; refuse it at startup, where the typo lives.
     #[test]
     fn idle_must_lose_the_race_to_timeout() {
-        assert!(build(None, None, None, Some(30), Some(60)).is_err());
-        assert!(build(None, None, None, Some(60), Some(60)).is_err());
-        assert!(build(None, None, None, Some(61), Some(60)).is_ok());
+        assert!(build(None, None, None, Some(30), Some(60), None).is_err());
+        assert!(build(None, None, None, Some(60), Some(60), None).is_err());
+        assert!(build(None, None, None, Some(61), Some(60), None).is_ok());
     }
 
     #[test]
@@ -234,21 +279,103 @@ mod tests {
         assert!(partial.base_url.is_none());
 
         let full: FileConfig = toml::from_str(
-            "base_url = \"http://box:9/v1\"\nmodel = \"m\"\ntemperature = 0.1\ntimeout_secs = 60\nidle_timeout_secs = 5\n",
+            "base_url = \"http://box:9/v1\"\nmodel = \"m\"\ntemperature = 0.1\ntimeout_secs = 60\nidle_timeout_secs = 5\nstyle = \"google\"\n",
         )
         .unwrap();
         assert_eq!(full.base_url.as_deref(), Some("http://box:9/v1"));
         assert_eq!(full.temperature, Some(0.1));
         assert_eq!(full.timeout_secs, Some(60));
         assert_eq!(full.idle_timeout_secs, Some(5));
+        assert_eq!(full.style.as_deref(), Some("google"));
 
         assert!(toml::from_str::<FileConfig>("mode1 = \"typo\"").is_err());
     }
 
     #[test]
     fn explicit_config_must_exist() {
+        let _g = load_lock();
         let missing = std::env::temp_dir().join("ghostwriter-no-such-config.toml");
         let err = load(Some(&missing)).unwrap_err();
         assert!(err.contains("does not exist"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn style_defaults_to_none_and_validates_registered_ids() {
+        assert_eq!(
+            build(None, None, None, None, None, None).unwrap().style,
+            "none"
+        );
+        assert_eq!(
+            build(None, None, None, None, None, Some(" Microsoft ".into()))
+                .unwrap()
+                .style,
+            "microsoft"
+        );
+        let err = build(None, None, None, None, None, Some("chicago".into())).unwrap_err();
+        assert!(err.contains("diataxis"), "{err}");
+        let f: FileConfig = toml::from_str("style = \"ste\"\n").unwrap();
+        assert_eq!(f.style.as_deref(), Some("ste"));
+    }
+
+    /// The retired `ste` key must reach a message that names the repair,
+    /// not the cold `deny_unknown_fields` refusal.
+    #[test]
+    fn retired_ste_config_key_names_the_replacement() {
+        let _g = load_lock();
+        let dir = std::env::temp_dir().join("ghostwriter-config-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("legacy.toml");
+        std::fs::write(&file, "ste = true\n").unwrap();
+        let err = load(Some(&file)).unwrap_err();
+        assert!(err.contains("`style`"), "{err}");
+        assert!(err.contains("ste"), "{err}");
+    }
+
+    #[test]
+    fn env_present_detects_nonempty_values() {
+        assert!(!env_present("GHOSTWRITER_TEST_PRESENT"));
+        std::env::set_var("GHOSTWRITER_TEST_PRESENT", "");
+        assert!(!env_present("GHOSTWRITER_TEST_PRESENT"));
+        std::env::set_var("GHOSTWRITER_TEST_PRESENT", "ste");
+        assert!(env_present("GHOSTWRITER_TEST_PRESENT"));
+        std::env::remove_var("GHOSTWRITER_TEST_PRESENT");
+    }
+    /// load() reads process env; every test that sets a real GHOSTWRITER_*
+    /// variable and calls load must take turns, or a sibling sees the
+    /// variable leak in.
+    fn load_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The env half of the retirement: a stale deployment exporting
+    /// GHOSTWRITER_STE must be refused with the repair named, never
+    /// silently ignored.
+    #[test]
+    fn retired_ghostwriter_ste_env_names_the_replacement() {
+        let _g = load_lock();
+        std::env::set_var("GHOSTWRITER_STE", "true");
+        let missing = std::env::temp_dir().join("ghostwriter-no-such-config-ste.toml");
+        let err = load(Some(&missing)).unwrap_err();
+        std::env::remove_var("GHOSTWRITER_STE");
+        assert!(err.contains("GHOSTWRITER_STE is retired"), "{err}");
+        assert!(err.contains("GHOSTWRITER_STYLE"), "{err}");
+    }
+
+    /// GHOSTWRITER_STYLE must win over the config file's style key, and
+    /// the file value must stand when the environment is quiet.
+    #[test]
+    fn ghostwriter_style_env_overrides_the_file() {
+        let _g = load_lock();
+        let dir = std::env::temp_dir().join("ghostwriter-style-env-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "style = \"none\"\n").unwrap();
+        std::env::set_var("GHOSTWRITER_STYLE", "google");
+        let c = load(Some(&file)).unwrap();
+        std::env::remove_var("GHOSTWRITER_STYLE");
+        assert_eq!(c.style, "google");
+        let c = load(Some(&file)).unwrap();
+        assert_eq!(c.style, "none");
     }
 }

@@ -18,7 +18,7 @@ use serde_json::json;
 
 use crate::client::Client;
 use crate::config::{Config, MAX_SOURCE_BYTES, MAX_TOKENS_CAP};
-use crate::prompts;
+use crate::{prompts, styles};
 
 /// Source/payload text arriving from a tool argument is fenced with four
 /// backticks; anything shorter collides with code blocks inside the
@@ -34,13 +34,54 @@ fn user_prompt(head: &str, label: &str, body: &str) -> String {
 fn error_result(message: String) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(message)])
 }
-/// System prompt for one call: the base house guide plus the ASD-STE100
-/// block when the caller asked for STE mode.
-fn system_prompt(base: &str, ste: Option<bool>) -> String {
-    if ste.unwrap_or(false) {
-        format!("{base}\n\n{}", prompts::STE_GUIDE)
-    } else {
-        base.to_string()
+/// System prompt for one call: the base house guide plus the selected
+/// style's guide block. The house guide always applies; an external
+/// standard layers on top of it.
+fn system_prompt(base: &str, style: Option<&styles::Style>) -> String {
+    match style {
+        Some(style) => format!("{base}\n\n{}", style.guide),
+        None => base.to_string(),
+    }
+}
+
+/// Resolve the style for one call: the caller's `style` argument, else the
+/// server default when the argument is absent. The retired `ste` boolean is
+/// refused with the replacement spelled out — a stale caller must fail
+/// loudly, never silently write without the standard it asked for.
+fn resolve_style(
+    requested: Option<&str>,
+    ste_legacy: &serde_json::Value,
+    default: &str,
+) -> Result<Option<&'static styles::Style>, String> {
+    if !ste_legacy.is_null() {
+        return Err(format!(
+            "the `ste` argument was replaced by `style`: pass style: \"ste\" for \
+             ASD-STE100 (valid: {})",
+            styles::usage()
+        ));
+    }
+    match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) if id.eq_ignore_ascii_case(styles::NONE_ID) => Ok(None),
+        Some(id) => match styles::lookup(id) {
+            Some(style) => Ok(Some(style)),
+            None => Err(format!(
+                "unknown style {id:?}; expected one of: {}",
+                styles::usage()
+            )),
+        },
+        None => {
+            if default.eq_ignore_ascii_case(styles::NONE_ID) {
+                Ok(None)
+            } else {
+                styles::lookup(default).map(Some).ok_or_else(|| {
+                    format!(
+                        "the configured default style {default:?} is not registered; \
+                         expected one of: {}",
+                        styles::usage()
+                    )
+                })
+            }
+        }
     }
 }
 
@@ -98,9 +139,17 @@ pub struct DocumentCodeArgs {
     /// Completion budget in tokens, 1..32768. Defaults to 8192.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Apply ASD-STE100 Simplified Technical English on top of the house style: approved general vocabulary, one meaning per word, command-form instructions, sentences within the STE length caps. ste_check reports mechanical violations without a model call.
+    /// Writing standard on top of the house style: ste (ASD-STE100 Simplified Technical English), google (Google developer documentation style guide), microsoft (Microsoft Writing Style Guide), diataxis (Diátaxis documentation architecture: one document, one mode), or none (house style only). Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ste: Option<bool>,
+    pub style: Option<String>,
+    /// Removed: the `ste` boolean argument was replaced by `style`. Calls that still send it are refused with the replacement spelled out.
+    #[serde(
+        default,
+        rename = "ste",
+        skip_serializing_if = "serde_json::Value::is_null"
+    )]
+    #[schemars(skip)]
+    pub ste_legacy: serde_json::Value,
     /// Sampling temperature, 0..2. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -126,9 +175,17 @@ pub struct RewriteProseArgs {
     /// Completion budget in tokens, 1..32768. Defaults to 4096.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Rewrite to ASD-STE100 Simplified Technical English on top of the house rules: approved vocabulary, approved verb forms, no semicolons or contractions, sentences within the STE caps (20 words for an instruction, 25 for description). Facts still survive verbatim.
+    /// Rewrite to obey an external standard on top of the house rules: ste (ASD-STE100), google (Google developer documentation style guide), microsoft (Microsoft Writing Style Guide), or diataxis (keep the text's Diátaxis mode — tutorial, how-to, reference, or explanation — and repair mode drift). Facts still survive verbatim. none keeps the house style alone. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ste: Option<bool>,
+    pub style: Option<String>,
+    /// Removed: the `ste` boolean argument was replaced by `style`. Calls that still send it are refused with the replacement spelled out.
+    #[serde(
+        default,
+        rename = "ste",
+        skip_serializing_if = "serde_json::Value::is_null"
+    )]
+    #[schemars(skip)]
+    pub ste_legacy: serde_json::Value,
     /// Sampling temperature, 0..2. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -151,9 +208,17 @@ pub struct CritiqueProseArgs {
     /// Completion budget in tokens, 1..32768. Defaults to 4096.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Also report ASD-STE100 violations (unapproved vocabulary, semicolons, contractions, sentences over the STE length caps) as numbered faults.
+    /// Also judge the text against an external standard: ste (ASD-STE100), google (Google developer documentation style guide), microsoft (Microsoft Writing Style Guide), or diataxis (name the mode the text aims for and flag mixed modes). none keeps the house faults alone. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ste: Option<bool>,
+    pub style: Option<String>,
+    /// Removed: the `ste` boolean argument was replaced by `style`. Calls that still send it are refused with the replacement spelled out.
+    #[serde(
+        default,
+        rename = "ste",
+        skip_serializing_if = "serde_json::Value::is_null"
+    )]
+    #[schemars(skip)]
+    pub ste_legacy: serde_json::Value,
     /// Sampling temperature, 0..2. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -194,22 +259,33 @@ pub struct ComposeArgs {
     /// Completion budget in tokens, 1..32768. Defaults to 8192.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Compose in ASD-STE100 Simplified Technical English on top of the house style: approved general vocabulary, command-form instructions, short one-topic sentences.
+    /// Compose under an external standard on top of the house style: ste (ASD-STE100), google (Google developer documentation style guide), microsoft (Microsoft Writing Style Guide), or diataxis (pick the one mode the material fits — tutorial, how-to, reference, or explanation — and write only in it). none keeps the house style alone. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ste: Option<bool>,
+    pub style: Option<String>,
+    /// Removed: the `ste` boolean argument was replaced by `style`. Calls that still send it are refused with the replacement spelled out.
+    #[serde(
+        default,
+        rename = "ste",
+        skip_serializing_if = "serde_json::Value::is_null"
+    )]
+    #[schemars(skip)]
+    pub ste_legacy: serde_json::Value,
     /// Sampling temperature, 0..2. Defaults to the server configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SteCheckArgs {
+pub struct StyleCheckArgs {
     /// The prose to check. Mutually exclusive with `path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// A file whose contents to check. Mutually exclusive with `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Which registered standard to check mechanically: ste (the default), google, or microsoft. The other registered styles have no deterministic rules and are refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 #[derive(Clone)]
@@ -310,10 +386,15 @@ impl WritingServer {
         {
             head.push_str(&format!("\nAuthor notes (follow them): {notes}"));
         }
-        if args.ste.unwrap_or(false) {
-            head.push_str("\nStandard: ASD-STE100 Simplified Technical English (issue 8).");
+        let style = match resolve_style(args.style.as_deref(), &args.ste_legacy, &self.config.style)
+        {
+            Ok(style) => style,
+            Err(e) => return Ok(error_result(e)),
+        };
+        if let Some(style) = style {
+            head.push_str(&format!("\n{}", style.head_line));
         }
-        let system = system_prompt(prompts::STYLE_GUIDE.as_str(), args.ste);
+        let system = system_prompt(prompts::STYLE_GUIDE.as_str(), style);
         Ok(self
             .render(
                 &system,
@@ -373,8 +454,13 @@ impl WritingServer {
         {
             head.push_str(&format!("\nAudience: {audience}"));
         }
-        if args.ste.unwrap_or(false) {
-            head.push_str("\nStandard: ASD-STE100 Simplified Technical English (issue 8).");
+        let style = match resolve_style(args.style.as_deref(), &args.ste_legacy, &self.config.style)
+        {
+            Ok(style) => style,
+            Err(e) => return Ok(error_result(e)),
+        };
+        if let Some(style) = style {
+            head.push_str(&format!("\n{}", style.head_line));
         }
         // The sample goes before the text: the model reads the voice it must
         // match first, mirroring the humanizer skill's sample-then-text order.
@@ -384,7 +470,7 @@ impl WritingServer {
             ),
             None => user_prompt(&head, "Text to rewrite", &body),
         };
-        let system = system_prompt(prompts::REWRITE_GUIDE.as_str(), args.ste);
+        let system = system_prompt(prompts::REWRITE_GUIDE.as_str(), style);
         Ok(self
             .render(
                 &system,
@@ -428,8 +514,13 @@ impl WritingServer {
                 " The writing sample defines the author's voice; do not flag a pattern the sample itself exhibits.",
             );
         }
-        if args.ste.unwrap_or(false) {
-            head.push_str(" Judge ASD-STE100 Simplified Technical English faults too (unapproved vocabulary, semicolons, contractions, sentences over 20 words for an instruction or 25 for description), quoting the phrase and giving the approved fix.");
+        let style = match resolve_style(args.style.as_deref(), &args.ste_legacy, &self.config.style)
+        {
+            Ok(style) => style,
+            Err(e) => return Ok(error_result(e)),
+        };
+        if let Some(style) = style {
+            head.push_str(style.critique_line);
         }
         let mut user = format!("{head}\n\nText to review:\n````text\n{body}\n````");
         if let Some(sample) = voice {
@@ -440,7 +531,7 @@ impl WritingServer {
         if let Some(source) = source {
             user.push_str(&format!("\n\nReference source:\n````text\n{source}\n````"));
         }
-        let system = system_prompt(prompts::CRITIQUE_GUIDE.as_str(), args.ste);
+        let system = system_prompt(prompts::CRITIQUE_GUIDE.as_str(), style);
         Ok(self
             .render(
                 &system,
@@ -539,8 +630,13 @@ impl WritingServer {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        if args.ste.unwrap_or(false) {
-            head.push_str("\nStandard: ASD-STE100 Simplified Technical English (issue 8).");
+        let style = match resolve_style(args.style.as_deref(), &args.ste_legacy, &self.config.style)
+        {
+            Ok(style) => style,
+            Err(e) => return Ok(error_result(e)),
+        };
+        if let Some(style) = style {
+            head.push_str(&format!("\n{}", style.head_line));
         }
         let user = match previous {
             Some(prev) => format!(
@@ -548,7 +644,7 @@ impl WritingServer {
             ),
             None => user_prompt(&head, "Material", &body),
         };
-        let system = system_prompt(prompts::COMPOSE_GUIDE.as_str(), args.ste);
+        let system = system_prompt(prompts::COMPOSE_GUIDE.as_str(), style);
         Ok(self
             .render(
                 &system,
@@ -588,24 +684,59 @@ impl WritingServer {
         Ok(CallToolResult::success(vec![content]))
     }
 
-    /// Deterministic ASD-STE100 Simplified Technical English check — no model call: reports unapproved general vocabulary with its approved replacement (against the STE100 Issue 8 controlled dictionary), semicolons, contractions, Latin abbreviations (etc., e.g., i.e.), and sentences over the STE caps (20 words for an instruction, 25 for description). Code blocks, inline code, commands, paths, and URLs are exempt. Returns JSON {clean, findings:[{line, quote, rule, fix}]}. Run it on technical prose before or instead of a model pass; findings are mechanical, so an empty list does not judge style. Provide `text` or `path` — exactly one.
+    /// Deterministic style check over the registered standards — no model call: `ste` (the default) reports the ASD-STE100 unapproved-word dictionary with approved replacements, semicolons, contractions, Latin abbreviations, and sentences over the STE caps (20 words for an instruction, 25 for description); `google` reports Latin abbreviations, exclamation marks, tone words (please, simply, easily, just, obviously, of course, let's), and internet slang (tl;dr, ymmv, rtfm); `microsoft` reports Latin abbreviations, exclamation marks, please, and the bias-free term list. Code blocks, inline code, commands, paths, and URLs are exempt. Returns JSON {clean, style, findings:[{line, quote, rule, fix}]}; the `ste` report adds `dictionary`, the shipped dictionary's entry count. Run it on technical prose before or instead of a model pass; findings are mechanical, so an empty list does not judge style. Provide `text` or `path` — exactly one.
     #[tool(
-        description = "Deterministic ASD-STE100 Simplified Technical English check — no model call: reports unapproved general vocabulary with its approved replacement (against the STE100 Issue 8 dictionary), semicolons, contractions, Latin abbreviations, and sentences over the STE caps (20 words for an instruction, 25 for description). Code blocks, inline code, commands, paths, and URLs are exempt. Returns JSON {clean, findings:[{line, quote, rule, fix}]}. Findings are mechanical; an empty list does not judge style. Provide `text` or `path` — exactly one."
+        description = "Deterministic style check over the registered standards — no model call: style ste (default) reports the ASD-STE100 unapproved-word dictionary, semicolons, contractions, Latin abbreviations, and sentence-length caps; google reports Latin abbreviations, exclamation marks, tone words (please, simply, easily, just, obviously, of course, let's), and internet slang (tl;dr, ymmv, rtfm); microsoft reports Latin abbreviations, exclamation marks, please, and the bias-free term list. Code blocks, inline code, commands, paths, and URLs are exempt. Returns JSON {clean, style, findings:[{line, quote, rule, fix}]}; the ste report adds dictionary, the shipped dictionary's entry count. Findings are mechanical; an empty list does not judge style. Provide `text` or `path` — exactly one."
     )]
-    async fn ste_check(
+    async fn style_check(
         &self,
-        Parameters(args): Parameters<SteCheckArgs>,
+        Parameters(args): Parameters<StyleCheckArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let requested = args
+            .style
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("ste");
+        let style = if requested.eq_ignore_ascii_case(styles::NONE_ID) {
+            return Ok(error_result(format!(
+                "the house style has no mechanical rules to check; expected one of: {}",
+                styles::checkable()
+            )));
+        } else {
+            match styles::lookup(requested) {
+                Some(style) => style,
+                None => {
+                    return Ok(error_result(format!(
+                        "unknown style {requested:?}; expected one of: {}",
+                        styles::checkable()
+                    )))
+                }
+            }
+        };
+        let rules = match style.rules {
+            Some(rules) => rules,
+            None => {
+                return Ok(error_result(format!(
+                    "style {:?} has no deterministic checks; the mechanical rules exist for: {}",
+                    style.id,
+                    styles::checkable()
+                )))
+            }
+        };
         let body = match source_body(args.text.as_deref(), args.path.as_deref()).await {
             Ok(body) => body,
             Err(e) => return Ok(error_result(e)),
         };
-        let findings = crate::ste::check(&body);
-        let report = json!({
+        let findings = crate::ste::check_with(&body, rules);
+        let mut report = json!({
             "clean": findings.is_empty(),
-            "dictionary": crate::ste::dictionary_len(),
+            "style": style.id,
             "findings": findings,
         });
+        if rules.dictionary {
+            report["dictionary"] = json!(crate::ste::dictionary_len());
+        }
         let content = match ContentBlock::json(&report) {
             Ok(content) => content,
             Err(e) => return Ok(error_result(e.message.into_owned())),
@@ -626,7 +757,7 @@ impl ServerHandler for WritingServer {
                  - rewrite_prose removes the AI-writing patterns from Wikipedia's \"Signs of AI writing\" (staged contrasts, one-line closers, forced triads, stock vocabulary, inflated significance, formatting-by-rule, chatbot residue) and preserves every fact: prose changes only, code blocks, commands, paths, and URLs stay intact, so it is safe on markdown files.\n\
                  - To humanize with visible checks: rewrite_prose, then critique_prose on the result, then rewrite_prose once more with the critique findings as `goal`.\n\
                  - To match a writer's voice, pass their prose as `voice_sample` to rewrite_prose (and critique_prose when reviewing): the sample steers register and word choice; em-dash rate preservation in rewrite is best-effort, and critique_prose judges dash rate against the sample.\n\
-                 - For technical documentation, pass ste: true to document_code, compose, rewrite_prose, or critique_prose to add ASD-STE100 Simplified Technical English (approved vocabulary, command-form instructions, short one-topic sentences); ste_check runs the mechanical half (dictionary lookups, semicolons, contractions, length caps) with no model call.\n\
+                 - For technical documentation, pass style: \"ste\", \"google\", \"microsoft\", or \"diataxis\" to document_code, compose, rewrite_prose, or critique_prose to write under ASD-STE100, the Google developer documentation style guide, the Microsoft Writing Style Guide, or the Diátaxis documentation architecture; style_check runs the mechanical half of ste, google, and microsoft with no model call. style: \"none\" keeps the house style alone and is the server default when the configuration sets none.\n\
                  - critique_prose returns exactly CLEAN when there is nothing to fix.\n\
                  - When the writing tools fail, call model_health first; it names the endpoint and the served model ids.\n",
             )
@@ -644,6 +775,7 @@ mod tests {
             temperature: 0.3,
             timeout: std::time::Duration::from_secs(1),
             idle_timeout: std::time::Duration::from_millis(500),
+            style: "none".into(),
         })
         .unwrap()
     }
@@ -668,7 +800,8 @@ mod tests {
                 audience: None,
                 voice_sample: None,
                 max_tokens: None,
-                ste: None,
+                style: None,
+                ste_legacy: serde_json::Value::Null,
                 temperature: None,
             }))
             .await,
@@ -688,7 +821,8 @@ mod tests {
                 audience: None,
                 notes: None,
                 max_tokens: None,
-                ste: None,
+                style: None,
+                ste_legacy: serde_json::Value::Null,
                 temperature: None,
             }))
             .await,
@@ -708,7 +842,8 @@ mod tests {
                 audience: None,
                 notes: None,
                 max_tokens: None,
-                ste: None,
+                style: None,
+                ste_legacy: serde_json::Value::Null,
                 temperature: None,
             }))
             .await,
@@ -733,7 +868,8 @@ mod tests {
                 previous: None,
                 notes: None,
                 max_tokens: None,
-                ste: None,
+                style: None,
+                ste_legacy: serde_json::Value::Null,
                 temperature: None,
             }))
             .await,
@@ -758,7 +894,8 @@ mod tests {
                 previous: None,
                 notes: None,
                 max_tokens: None,
-                ste: None,
+                style: None,
+                ste_legacy: serde_json::Value::Null,
                 temperature: None,
             }))
             .await,
@@ -783,7 +920,8 @@ mod tests {
                 previous: None,
                 notes: None,
                 max_tokens: None,
-                ste: None,
+                style: None,
+                ste_legacy: serde_json::Value::Null,
                 temperature: None,
             }))
             .await,
@@ -806,12 +944,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ste_check_requires_source() {
+    async fn style_check_requires_source() {
         let s = server();
         assert_error_result(
-            s.ste_check(Parameters(SteCheckArgs {
+            s.style_check(Parameters(StyleCheckArgs {
                 text: None,
                 path: None,
+                style: None,
             }))
             .await,
             "provide",
@@ -820,19 +959,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ste_check_reports_planted_violations() {
+    async fn style_check_defaults_to_ste_and_reports_planted_violations() {
         let s = server();
         let result = s
-            .ste_check(Parameters(SteCheckArgs {
+            .style_check(Parameters(StyleCheckArgs {
                 text: Some(
                     "The operator utilizes the gauge to initiate the pump; the reading is stable.\nSet the valve to the open position.\n".into(),
                 ),
                 path: None,
+                style: None,
             }))
             .await
             .expect("no protocol error");
         assert_ne!(result.is_error, Some(true));
         let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("\"style\":\"ste\""), "{text}");
         assert!(text.contains("\"clean\":false"), "{text}");
         assert!(text.contains("utilize"), "{text}");
         assert!(text.contains("initiate"), "{text}");
@@ -840,16 +981,189 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ste_check_clean_prose() {
+    async fn style_check_clean_prose() {
         let s = server();
         let result = s
-            .ste_check(Parameters(SteCheckArgs {
+            .style_check(Parameters(StyleCheckArgs {
                 text: Some("Turn the handle two full turns. Tighten the nut to 20 Nm.".into()),
                 path: None,
+                style: None,
             }))
             .await
             .expect("no protocol error");
         let text = result.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("\"clean\":true"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn style_check_runs_the_google_rule_set() {
+        let s = server();
+        let result = s
+            .style_check(Parameters(StyleCheckArgs {
+                text: Some("Simply deploy the app, e.g. on Fridays.".into()),
+                path: None,
+                style: Some("google".into()),
+            }))
+            .await
+            .expect("no protocol error");
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("\"style\":\"google\""), "{text}");
+        assert!(text.contains("google-tone"), "{text}");
+        assert!(text.contains("google-latin"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn style_check_refuses_styles_without_mechanical_rules() {
+        let s = server();
+        assert_error_result(
+            s.style_check(Parameters(StyleCheckArgs {
+                text: Some("anything".into()),
+                path: None,
+                style: Some("diataxis".into()),
+            }))
+            .await,
+            "no deterministic checks",
+        )
+        .await;
+        assert_error_result(
+            s.style_check(Parameters(StyleCheckArgs {
+                text: Some("anything".into()),
+                path: None,
+                style: Some("none".into()),
+            }))
+            .await,
+            "house style has no mechanical rules",
+        )
+        .await;
+        assert_error_result(
+            s.style_check(Parameters(StyleCheckArgs {
+                text: Some("anything".into()),
+                path: None,
+                style: Some("chicago".into()),
+            }))
+            .await,
+            "unknown style",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unknown_style_lists_valid_styles() {
+        let s = server();
+        assert_error_result(
+            s.document_code(Parameters(DocumentCodeArgs {
+                code: Some("fn main() {}".into()),
+                path: None,
+                kind: None,
+                audience: None,
+                notes: None,
+                max_tokens: None,
+                style: Some("chicago".into()),
+                ste_legacy: serde_json::Value::Null,
+                temperature: None,
+            }))
+            .await,
+            "diataxis",
+        )
+        .await;
+    }
+
+    /// The retired `ste` boolean must fail loudly with the replacement
+    /// named — never be ignored, which would silently drop the standard.
+    #[tokio::test]
+    async fn legacy_ste_argument_is_refused() {
+        let s = server();
+        assert_error_result(
+            s.rewrite_prose(Parameters(RewriteProseArgs {
+                text: Some("The system utilizes the pump.".into()),
+                path: None,
+                goal: None,
+                audience: None,
+                voice_sample: None,
+                max_tokens: None,
+                style: None,
+                ste_legacy: serde_json::json!(true),
+                temperature: None,
+            }))
+            .await,
+            "`style`",
+        )
+        .await;
+    }
+
+    /// The config `style` default applies when the caller omits the
+    /// argument; an explicit argument always wins; `none` opts out of even
+    /// a server-configured standard; unknown ids list the valid ones.
+    #[test]
+    fn style_resolution_prefers_the_caller() {
+        let ste_marker = "ASD-STE100 mode (Simplified Technical English)";
+        let google_marker = "Google developer documentation style";
+        assert!(system_prompt(
+            "BASE",
+            resolve_style(None, &serde_json::Value::Null, "ste").unwrap()
+        )
+        .contains(ste_marker));
+        assert!(system_prompt(
+            "BASE",
+            resolve_style(None, &serde_json::Value::Null, "google").unwrap()
+        )
+        .contains(google_marker));
+        assert_eq!(
+            system_prompt(
+                "BASE",
+                resolve_style(None, &serde_json::Value::Null, "none").unwrap()
+            ),
+            "BASE"
+        );
+        assert_eq!(
+            system_prompt(
+                "BASE",
+                resolve_style(Some("none"), &serde_json::Value::Null, "ste").unwrap()
+            ),
+            "BASE"
+        );
+        assert!(system_prompt(
+            "BASE",
+            resolve_style(Some("STE"), &serde_json::Value::Null, "none").unwrap()
+        )
+        .contains(ste_marker));
+        let err = resolve_style(Some("chicago"), &serde_json::Value::Null, "none").unwrap_err();
+        assert!(err.contains("google") && err.contains("diataxis"), "{err}");
+        let err = resolve_style(None, &serde_json::json!(true), "none").unwrap_err();
+        assert!(err.contains("`style`"), "{err}");
+        // A default that never reached the registry (reachable only by
+        // constructing Config directly) must refuse, not silently drop.
+        let err = resolve_style(None, &serde_json::Value::Null, "chicago").unwrap_err();
+        assert!(err.contains("not registered"), "{err}");
+    }
+    /// The retire must survive the real consumer path: rmcp hands the
+    /// handler JSON arguments through serde. A wrong rename, a field made
+    /// `skip`, or a set `ste` read as "absent" would let a stale caller
+    /// silently lose its standard — the one outcome the invariant forbids.
+    #[test]
+    fn legacy_ste_refusal_survives_deserialization() {
+        let args: RewriteProseArgs = serde_json::from_str(r#"{"text":"x","ste":true}"#).unwrap();
+        let err = resolve_style(args.style.as_deref(), &args.ste_legacy, "none").unwrap_err();
+        assert!(err.contains("replaced by `style`"), "{err}");
+
+        // An explicit JSON null reads as absent, the standard convention
+        // for an unset optional argument. Anything the caller actually set
+        // — including the old `false` opt-out — must refuse loudly.
+        let args: RewriteProseArgs = serde_json::from_str(r#"{"text":"x","ste":null}"#).unwrap();
+        assert!(args.ste_legacy.is_null());
+        assert!(resolve_style(args.style.as_deref(), &args.ste_legacy, "none").is_ok());
+        let args: RewriteProseArgs = serde_json::from_str(r#"{"text":"x","ste":false}"#).unwrap();
+        assert!(resolve_style(args.style.as_deref(), &args.ste_legacy, "none").is_err());
+
+        // A modern call deserializes with the retired field truly absent.
+        let args: RewriteProseArgs =
+            serde_json::from_str(r#"{"text":"x","style":"none"}"#).unwrap();
+        assert!(args.ste_legacy.is_null());
+
+        // The advertised schema must not offer the retired argument.
+        let schema = serde_json::to_value(schemars::schema_for!(RewriteProseArgs)).unwrap();
+        let props = schema.get("properties").unwrap();
+        assert!(props.get("style").is_some(), "{schema}");
+        assert!(props.get("ste").is_none(), "{schema}");
     }
 }

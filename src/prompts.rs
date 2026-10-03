@@ -60,11 +60,12 @@ E. Leftovers from the chat and the draft
     )
 });
 /// ASD-STE100 (Issue 8) rules, paraphrased for the model. Appended to a
-/// base guide when a tool call sets `ste: true`; the mechanical half of
-/// the standard (dictionary lookups, semicolon/contraction/length checks)
-/// is enforced in code by `ste::check`, so this block concentrates on what
-/// only a model can do: choose approved words with the right meaning and
-/// rebuild sentences. The spec text itself is never quoted here.
+/// base guide when a call resolves to `style: "ste"`; the mechanical half
+/// of the standard (dictionary lookups, semicolon/contraction/length
+/// checks) is enforced in code by the `STE_RULES` engine behind
+/// `style_check`, so this block concentrates on what only a model can do:
+/// choose approved words with the right meaning and rebuild sentences.
+/// The spec text itself is never quoted here.
 pub const STE_GUIDE: &str = "ASD-STE100 mode (Simplified Technical English). These rules override style preferences. They govern prose only: leave code blocks, inline code, commands, paths, and URLs untouched.
 
 Words
@@ -97,6 +98,109 @@ Risk statements
 - When stating a danger to persons, open with Warning; for damage to equipment, Caution. Start with the command or condition, then state the consequence in its own sentence (\"WARNING: Wear a face mask before you fill the system. The fluid can blind you.\").
 
 Keep the output format the base guide requires: the STE rules change wording and sentence shape, not the document structure, and every fact still comes from the provided source or material.";
+
+/// Google developer documentation style rules, paraphrased for the model.
+/// Appended to a base guide when a tool call resolves to `style: "google"`.
+/// The mechanical half (Latin abbreviations, tone words, internet
+/// abbreviations, exclamation marks) is enforced in code by the rules in
+/// `styles::GOOGLE_RULES`; this block concentrates on what only a model can
+/// do: rebuild voice, tense, and structure. The guide's own text is never
+/// quoted here.
+pub const GOOGLE_GUIDE: &str = r#"Google developer documentation style. These rules layer on the house guide and override style preferences. They govern prose only: leave code blocks, inline code, commands, paths, and URLs untouched.
+
+Voice
+- Write for a developer in a hurry: second person ("you"), active voice, present tense. Conversational and direct, like a knowledgeable friend — not a formal manual, not slang.
+- Use present tense for general behavior ("The server sends an acknowledgment," never "will send"). Keep will only for a genuinely later event; rewrite hypothetical would into the present.
+- Do not start every sentence with "You can" or "To do X"; vary the opening or drop the filler.
+- Never write please in an instruction. Never write simply, easily, just, obviously, of course, or "it's that simple" — nothing is simple to a reader in a hurry. No exclamation marks.
+- No let's: address the reader as you.
+- Prefer common contractions, and prefer negation contractions (don't, can't) over do not / cannot: a scanning reader misses the not. Never coin contractions and never use three-word contractions (mightn't've).
+
+Words and abbreviations
+- No Latin abbreviations: write for example, not e.g.; that is, not i.e.; and so on, not etc. — or write out the full list.
+- No internet abbreviations (tl;dr, ymmv, rtfm): write the plain phrase instead.
+- Spell out an unfamiliar abbreviation on first use, with the abbreviation in parentheses; use the abbreviation alone afterward. Capitalize the spelled-out form only when the name itself is a proper noun.
+- Never use an acronym as a verb: "use SSH to log in," not "ssh into."
+- Avoid buzzwords, jargon, idioms, humor, and culture-specific references; a global audience reads this.
+- Use the serial comma: "Android, iOS, and Windows."
+
+Structure
+- Headings: sentence case, no ending punctuation, no title case. Task headings start with a bare infinitive ("Create a topic"); conceptual headings are noun phrases ("Topic lifecycle").
+- Lists: one idea per item, the same grammatical shape across items, introduced by a complete sentence.
+- Procedures: numbered steps, one action per step, imperative to start ("Add the filename to the backup list").
+- Keep each sentence to one idea; no choppy or long-winded sentences; do not repeat the heading in the first line under it.
+
+Keep the output format the base guide requires: the style rules change wording and sentence shape, not the document structure, and every fact still comes from the provided source or material."#;
+
+/// Microsoft Writing Style Guide rules, paraphrased for the model. Appended
+/// to a base guide when a tool call resolves to `style: "microsoft"`. The
+/// mechanical half (Latin abbreviations, the bias-free term swaps, missing
+/// exclamation discipline) is enforced in code by the rules in
+/// `styles::MICROSOFT_RULES`; this block carries voice, bias-free rewrites,
+/// and structure. The guide's own text is never quoted here.
+pub const MICROSOFT_GUIDE: &str = r#"Microsoft Writing Style Guide. These rules layer on the house guide and override style preferences. They govern prose only: leave code blocks, inline code, commands, paths, and URLs untouched.
+
+Voice
+- Simple and human: warm and relaxed, crisp and clear, ready to lend a hand. Write like you speak, in short everyday words; a friendly colleague, not a press release.
+- Second person ("you"); imperative mood for steps, indicative for statements. Avoid the subjunctive ("if I were" — rewrite the sentence).
+- Get to the point fast: lead with the takeaway, then support it. Bigger ideas, fewer words: prune every word that does no work. Short sentences and crisp fragments are the style.
+- Use contractions — it's, you'll, you're, we're, let's: they are how the voice stays human. Do not write them out to sound formal.
+- Active voice; use passive only where it avoids blaming the reader or rescues an awkward sentence.
+
+Words
+- Cut weak openings: no "you can" where the sentence works without it; no "there is," "there are," or "there were" to launch a statement — start with the verb.
+- Never write please in an instruction or in UI text; no exclamation marks; no slang, humor, or references that do not translate.
+- No Latin abbreviations: write for example, not e.g.; that is, not i.e.; and so on, not etc.
+- Spell out an unfamiliar acronym on first use; skip the spelling for terms the audience knows. Never make a product name a verb.
+- Bias-free, always: no generic he, him, his, she, or hers — rewrite to you, to a plural they/their, or to the role (the reader, the admin). Address groups as everyone or you, never guys. Replace master/slave with primary/subordinate, blacklist with block list, whitelist with allow list, manpower with workforce, mankind with humankind, chairman with chair, salesman with sales representative, manmade with synthetic, and hang with stop responding. Describe people first: readers who are blind, not the blind.
+
+Structure
+- Serial comma in every list of three or more: "Android, iOS, and Windows."
+- Headings: sentence-style capitalization — capitalize only the first word and proper names ("Limited-time offer," not "Limited Time Offer") — with no period or colon at the end.
+- No spaces around an em dash; one space after a period.
+- Procedures: numbered steps, one action each, complete sentences in imperative mood; name the place first ("On the Design tab, ...") and finish the procedure (include the OK or Apply step).
+- Use input-neutral verbs — select, not click; go to, not right-click; enter a value — so the text serves touch, pen, and keyboard readers as well as the mouse.
+
+Keep the output format the base guide requires: the style rules change wording and sentence shape, not the document structure, and every fact still comes from the provided source or material."#;
+
+/// Diátaxis documentation-architecture rules, paraphrased for the model.
+/// Appended to a base guide when a tool call resolves to `style: "diataxis"`.
+/// Unlike the prose standards, Diátaxis governs what a document is for:
+/// every document takes exactly one of four modes. There is no mechanical
+/// half — mode mixing is a semantic judgment, so the registry carries this
+/// style with `rules: None` and `style_check` refuses it. The framework's
+/// own text is never quoted here.
+pub const DIATAXIS_GUIDE: &str = r#"Diátaxis mode (documentation architecture). Choose one of the four modes from the material and write only in that mode; mixing modes in one document is the failure this framework exists to fix.
+- tutorial — the reader is learning by doing, for the first time.
+- how-to — the reader has a goal and needs guiding to the result.
+- reference — the reader consults facts about the machinery.
+- explanation — the reader seeks understanding, context, and the why.
+When drafting or composing, open the response with exactly one line, Diátaxis mode: <mode>, then the document. When rewriting, do not add the line: keep the text's dominant mode and repair mode drift in place.
+
+Tutorial (learning-oriented)
+- Open by saying what the lesson will build ("In this tutorial, we will create ..."), never "you will learn".
+- Numbered, concrete steps, one action each; every step produces a small visible result.
+- Keep a narrative of the expected: "You should see ...", with the exact expected output; flag the likely sign of having skipped a step.
+- Guide as a tutor alongside the reader (we ...), and point things out ("Notice that ...").
+- No explanation beyond one short clause, no options or alternatives, nothing abstract — link out for depth and stay concrete.
+- Close by naming what the learner built.
+
+How-to (task-oriented)
+- Title names the task exactly ("How to configure retry backoff"), addressed to the reader's problem, not the tool's motions.
+- Action only: conditional imperatives ("If you want X, do Y."), one logical sequence, no teaching, no digressions, no exhaustive option lists — link to reference instead.
+- Assume a competent reader: omit the obvious mechanics, and branch with if-then statements instead of hand-holding.
+
+Reference (information-oriented)
+- Describe, and only describe: austere, neutral, authoritative facts whose structure mirrors the code or API it documents.
+- Use one standard pattern for listing commands, options, defaults, limits, and error messages; a usage example is allowed as a concise fact.
+- No instruction, no explanation, no opinion, no promotion; state a warning only where there is real risk.
+
+Explanation (understanding-oriented)
+- Discuss why: design decisions, history, constraints, alternatives, trade-offs; make connections beyond the immediate topic.
+- Judgment and weighed alternatives belong here and only here.
+- Stay bounded: no procedures and no exhaustive lists — link to the how-to and reference that own them.
+
+If the material is a report rather than documentation (a standup, a summary, a changelog), pick the closest mode — usually explanation — and do not force a procedure onto it. Keep every fact from the provided source or material: the mode changes what the document does, never what it may claim."#;
 
 /// Drafting guide: used by `document_code`.
 pub static STYLE_GUIDE: LazyLock<String> = LazyLock::new(|| {

@@ -427,6 +427,7 @@ mod tests {
             temperature: 0.3,
             timeout: Duration::from_secs(2),
             idle_timeout: Duration::from_secs(2),
+            style: "none".into(),
         }
     }
 

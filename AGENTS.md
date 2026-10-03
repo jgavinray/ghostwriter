@@ -28,10 +28,20 @@ cross-session state lives in `~/exomemory/`, never here.
   truncation markers, `error_result`.
 - `src/prompts.rs` — the style guides. This is the product: the guides are why
   output is not generic LLM prose. Treat edits here as behavior changes.
-- `src/ste.rs` — the ASD-STE100 integration. `STE_GUIDE` (a summary of the
-  specification's writing rules, appended to the system prompt when a caller
-  passes `ste: true`) and the deterministic `check()` behind `ste_check`.
-  The approved-general-vocabulary dictionary ships as
+- `src/styles.rs` — the style registry, the extension point for external
+  writing standards. One row per standard binds an id (`style: "ste"` etc.)
+  to its prompt guide (from `prompts`), its head line, its critique judging
+  sentence, and an optional mechanical rule set (`Rules`) for
+  `style_check`. Adding a standard is the four-step recipe in the module
+  doc; registered today: `ste`, `google`, `microsoft`, `diataxis` (Diátaxis
+  is a structure framework, not a prose style, so it carries no mechanical
+  rules and `style_check` refuses it with a clear message).
+- `src/ste.rs` — the deterministic mechanical engine behind `style_check`:
+  dictionary lookups and line-level rules run through `check_with()` under
+  a `Rules` policy (which primitives fire, which extra word table applies).
+  `STE_RULES` is the ASD-STE100 set; `ste::check()` is its pinned wrapper.
+  The prompt-side rule summaries live in `prompts`, the style bindings in
+  `styles`. The approved-general-vocabulary dictionary ships as
   `assets/ste100-unapproved.tsv` (`word<TAB>pos<TAB>APPROVED REPLACEMENT`,
   `#` comments), embedded with `include_str!` at compile time. It is
   byte-reproducible: `pdftotext -layout` the ASD-STE100 Issue 8 PDF, then
@@ -47,6 +57,10 @@ cross-session state lives in `~/exomemory/`, never here.
   (`MAX_SOURCE_BYTES`), and a `finish_reason: "length"` answer appends a
   re-call hint. Silent truncation is a bug.
 - Unknown `kind` values are refused with the valid list — never guessed at.
+  Unknown `style` values are refused the same way. The retired `ste: true`
+  tool argument, `ste = true` config key, and `GHOSTWRITER_STE` env var are
+  refused loudly with `style` named as the replacement — a stale caller
+  must never silently lose the standard it asked for.
 - Inline payloads are fenced with four backticks in `user_prompt`; shorter
   fences collide with real content.
 - `MAX_TOKENS_CAP` (32768) exists because the served context is 131072 tokens;
@@ -56,11 +70,14 @@ cross-session state lives in `~/exomemory/`, never here.
   server.
 - "hemmingway" (two m's, single h) is the served model id — intentional, do
   not "fix" the spelling.
-- `ste_check` performs no network call: its result is a pure function of the
-  embedded dictionary, so tests can pin exact findings. The dictionary is
-  word-level replacement data (word, part of speech, approved replacement);
-  the ASD manual's own text does not enter the repository — `STE_GUIDE` is a
-  summary, not an excerpt.
+- `style_check` performs no network call: its result is a pure function of
+  the text and the registered `Rules`, so tests can pin exact findings. A
+  style without mechanical rules must be refused, never report `clean`.
+  The dictionary is word-level replacement data (word, part of speech,
+  approved replacement); the ASD manual's own text does not enter the
+  repository — `STE_GUIDE` is a summary, not an excerpt. The same holds for
+  every registered guide: source guides are copyrighted, so `prompts.rs`
+  carries paraphrases only.
 
 ## Config contract
 
@@ -68,15 +85,21 @@ cross-session state lives in `~/exomemory/`, never here.
   per owner decision (no XDG redirection, no Library path).
 - `--config` names a file that must exist; the default path may be absent.
 - Env vars: `GHOSTWRITER_BASE_URL`, `GHOSTWRITER_MODEL`,
-  `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`. There are no legacy
-  `HEMMINGWAY_*` aliases.
+  `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`,
+  `GHOSTWRITER_IDLE_TIMEOUT_SECS`, `GHOSTWRITER_STYLE` (a registered id,
+  case-insensitive). `GHOSTWRITER_STE` is retired and refused at startup.
+  There are no legacy `HEMMINGWAY_*` aliases.
+- `style` (string, default `"none"`) is the server-side default for the
+  per-call `style` argument, validated against the registry at startup:
+  with `style = "ste"`, calls that omit the argument compose in ASD-STE100;
+  an explicit `style` from the caller — including `"none"` — always wins.
 - Defaults point at the fleet box (`http://hyper03:8002/v1`); installs
   elsewhere must override `base_url` and `model`.
 
 ## Verify before claiming done
 
 ```sh
-cargo test                    # 33 tests, all must pass
+cargo test                    # 58 tests, all must pass
 cargo clippy --all-targets    # clean, no warnings
 cargo fmt --check             # clean
 cargo build --release         # the deployed artifact

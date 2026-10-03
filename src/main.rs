@@ -8,7 +8,7 @@
 //! `~/.config/ghostwriter/config.toml` on macOS and Linux alike), then by
 //! `GHOSTWRITER_*` environment variables (see `config::load`). `--self-check`
 //! resolves the configuration, prints ONE JSON line
-//! `{base_url, model, temperature, timeout_secs, idle_timeout_secs}` to
+//! `{base_url, model, temperature, timeout_secs, idle_timeout_secs, style}` to
 //! stdout, and exits 0 — configuration that cannot resolve is never served
 //! with.
 
@@ -56,12 +56,13 @@ async fn main() {
     };
     if self_check {
         println!(
-            "{{\"base_url\":{},\"model\":{},\"temperature\":{},\"timeout_secs\":{},\"idle_timeout_secs\":{}}}",
+            "{{\"base_url\":{},\"model\":{},\"temperature\":{},\"timeout_secs\":{},\"idle_timeout_secs\":{},\"style\":{}}}",
             serde_json::Value::from(config.base_url),
             serde_json::Value::from(config.model),
             config.temperature,
             config.timeout.as_secs(),
             config.idle_timeout.as_secs(),
+            serde_json::Value::from(config.style),
         );
         exit(0);
     }
