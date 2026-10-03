@@ -156,6 +156,11 @@ fn mask(text: &str) -> Vec<char> {
         let t = line.trim_start();
         if t.starts_with("```") || t.starts_with("~~~") {
             in_fence = !in_fence;
+            // The delimiter line is fence syntax, not prose: mask it too,
+            // or an info string like ```utilize gets checked as a word.
+            for c in &mut buf[base..base + line.chars().count()] {
+                *c = ' ';
+            }
             base += line.chars().count() + 1;
             continue;
         }
@@ -188,24 +193,28 @@ fn mask(text: &str) -> Vec<char> {
             }
         }
 
-        // scheme:// URIs
+        // scheme:// URIs, scanned in char space: `find` on a String hands
+        // back byte offsets, and byte and char indices disagree the moment
+        // the line carries multibyte text (an é in the URL would slide the
+        // masked window right and uncover the following word).
         for scheme in [
             "http://", "https://", "ftp://", "kaibo://", "agent://", "file://",
         ] {
-            let hay: String = masked.iter().collect();
-            let mut search_from = 0;
-            while let Some(pos) = hay[search_from..].find(scheme) {
-                let pos = search_from + pos;
-                let end = hay[pos..]
-                    .find(char::is_whitespace)
-                    .map(|i| pos + i)
-                    .unwrap_or(hay.len());
-                for (idx, c) in masked.iter_mut().enumerate() {
-                    if idx >= pos && idx < end {
+            let scheme: Vec<char> = scheme.chars().collect();
+            let mut i = 0usize;
+            while i + scheme.len() <= masked.len() {
+                if masked[i..i + scheme.len()] == scheme[..] {
+                    let mut end = i + scheme.len();
+                    while end < masked.len() && !masked[end].is_whitespace() {
+                        end += 1;
+                    }
+                    for c in &mut masked[i..end] {
                         *c = ' ';
                     }
+                    i = end;
+                } else {
+                    i += 1;
                 }
-                search_from = end;
             }
         }
 
@@ -317,7 +326,12 @@ const CONTRACTIONS: &[(&str, &str)] = &[
 
 /// Sentence-length caps from the spec: 20 words for an instruction, 25 for
 /// descriptive prose. A sentence whose first word is not a subject marker
-/// is treated as an instruction.
+/// is treated as an instruction. Known heuristic gap: a first word is a
+/// single-word classifier, so a purpose-clause instruction ("To configure
+/// the relay, ...") and a prepositional description ("In the test, ...")
+/// open alike and both take the 25-word cap. Tightening the list would
+/// false-positive the descriptive half; the 20-vs-25 call on such openers
+/// stays the model's judgment, per the engine's silence-is-judgment rule.
 const MAX_INSTRUCTION_WORDS: usize = 20;
 const MAX_DESCRIBE_WORDS: usize = 25;
 
@@ -419,21 +433,27 @@ fn ste_words(s: &str) -> usize {
     count
 }
 
-fn find_word(hay: &str, needle: &str) -> Option<usize> {
-    hay.match_indices(needle).find_map(|(i, _)| {
-        let before_ok = i == 0
-            || !hay[..i]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c.is_ascii_alphanumeric());
-        let after = hay[i + needle.len()..].chars().next();
-        let after_ok = !after.is_some_and(|c| c.is_ascii_alphanumeric());
-        if before_ok && after_ok {
-            Some(i)
-        } else {
-            None
-        }
-    })
+/// Char indices in `hay` where `needle` occurs at word boundaries. The
+/// positions index the original line's char buffer for quoting, so the
+/// byte offsets `match_indices` hands back are converted, and every
+/// occurrence is reported, not just the first.
+fn find_words(hay: &str, needle: &str) -> Vec<usize> {
+    hay.match_indices(needle)
+        .filter_map(|(i, _)| {
+            let before_ok = i == 0
+                || !hay[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric());
+            let after = hay[i + needle.len()..].chars().next();
+            let after_ok = !after.is_some_and(|c| c.is_ascii_alphanumeric());
+            if before_ok && after_ok {
+                Some(hay[..i].chars().count())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Join a paragraph's masked lines, split into sentences, and report each
@@ -612,7 +632,7 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
         let hay = mline.to_lowercase();
         if rules.latin {
             for (needle, fix) in LATIN {
-                if let Some(pos) = find_word(&hay, needle) {
+                for pos in find_words(&hay, needle) {
                     findings.push(Finding {
                         line: lineno,
                         quote: clip(&quote_at(&ochars, pos, needle)),
@@ -624,7 +644,7 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
         }
         if rules.contractions {
             for (needle, fix) in CONTRACTIONS {
-                if let Some(pos) = find_word(&hay, needle) {
+                for pos in find_words(&hay, needle) {
                     findings.push(Finding {
                         line: lineno,
                         quote: clip(&quote_at(&ochars, pos, needle)),
@@ -635,7 +655,7 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
             }
         }
         for w in rules.words {
-            if let Some(pos) = find_word(&hay, w.needle) {
+            for pos in find_words(&hay, w.needle) {
                 findings.push(Finding {
                     line: lineno,
                     quote: clip(&quote_at(&ochars, pos, w.needle)),
@@ -838,5 +858,61 @@ mod tests {
             },
         ];
         assert_eq!(check(text), expected);
+    }
+
+    /// Char-safety in the URL mask: a multibyte character inside the URL
+    /// run used to shift the masked window right (byte offsets driving a
+    /// char-index loop), uncovering the first character of the following
+    /// word so its violation went unreported.
+    #[test]
+    fn url_masking_is_char_safe() {
+        let f = check("Open https://x.io/naïve utilize it now.");
+        assert!(
+            f.iter()
+                .any(|x| x.rule == "ste-vocab" && x.quote == "utilize"),
+            "utilize after a multibyte URL escaped the dictionary: {f:?}"
+        );
+    }
+
+    /// Quotes index the original line in chars: with multibyte text
+    /// before the needle, the old byte offset quoted a window displaced
+    /// to the right.
+    #[test]
+    fn word_rule_quotes_are_char_safe() {
+        let f = check_with("Café — simply open it.", &crate::styles::GOOGLE_RULES);
+        assert!(
+            f.iter()
+                .any(|x| x.rule == "google-tone" && x.quote == "simply"),
+            "quote displaced by the multibyte prefix: {f:?}"
+        );
+    }
+
+    /// Banned-word rules report every textual variant on a line (the old
+    /// first-match-only missed the second); the (line, rule, quote)
+    /// report identity collapses identical repeats to one finding.
+    #[test]
+    fn every_occurrence_is_reported() {
+        let f = check_with(
+            "Simply configure it. simply start it.",
+            &crate::styles::GOOGLE_RULES,
+        );
+        let n = f.iter().filter(|x| x.rule == "google-tone").count();
+        assert_eq!(n, 2, "expected one finding per variant: {f:?}");
+        let f = check_with(
+            "Simply configure it. Simply start it.",
+            &crate::styles::GOOGLE_RULES,
+        );
+        let n = f.iter().filter(|x| x.rule == "google-tone").count();
+        assert_eq!(n, 1, "identical repeats collapse under dedup: {f:?}");
+    }
+    /// A fence delimiter line is syntax, not prose: an info string made
+    /// of an unapproved word must not be checked as a word.
+    #[test]
+    fn fence_delimiter_lines_are_masked() {
+        let f = check("```utilize\nplain text here\n```");
+        assert!(
+            f.iter().all(|x| !x.quote.contains("utilize")),
+            "fence info string was checked as prose: {f:?}"
+        );
     }
 }

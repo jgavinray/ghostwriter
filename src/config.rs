@@ -203,22 +203,22 @@ fn env_str(key: &str) -> Option<String> {
 }
 
 fn env_f32(key: &str) -> Result<Option<f32>, String> {
-    match std::env::var(key) {
-        Ok(value) => value
+    match env_str(key) {
+        Some(value) => value
             .parse::<f32>()
             .map(Some)
             .map_err(|_| format!("{key} is not a number: {value}")),
-        Err(_) => Ok(None),
+        None => Ok(None),
     }
 }
 
 fn env_u64(key: &str) -> Result<Option<u64>, String> {
-    match std::env::var(key) {
-        Ok(value) => value
+    match env_str(key) {
+        Some(value) => value
             .parse::<u64>()
             .map(Some)
             .map_err(|_| format!("{key} is not a number: {value}")),
-        Err(_) => Ok(None),
+        None => Ok(None),
     }
 }
 
@@ -339,6 +339,20 @@ mod tests {
         std::env::set_var("GHOSTWRITER_TEST_PRESENT", "ste");
         assert!(env_present("GHOSTWRITER_TEST_PRESENT"));
         std::env::remove_var("GHOSTWRITER_TEST_PRESENT");
+    }
+
+    /// An exported-but-empty numeric variable means "unset", exactly as
+    /// an empty string variable already does: `VAR=` is shell idiom and
+    /// must not fail startup with `is not a number: `.
+    #[test]
+    fn empty_numeric_env_vars_are_absent_not_errors() {
+        std::env::set_var("GHOSTWRITER_TEST_SECS", "");
+        assert_eq!(env_u64("GHOSTWRITER_TEST_SECS").unwrap(), None);
+        assert_eq!(env_f32("GHOSTWRITER_TEST_SECS").unwrap(), None);
+        std::env::set_var("GHOSTWRITER_TEST_SECS", "not-a-number");
+        assert!(env_u64("GHOSTWRITER_TEST_SECS").is_err());
+        assert!(env_f32("GHOSTWRITER_TEST_SECS").is_err());
+        std::env::remove_var("GHOSTWRITER_TEST_SECS");
     }
     /// load() reads process env; every test that sets a real GHOSTWRITER_*
     /// variable and calls load must take turns, or a sibling sees the

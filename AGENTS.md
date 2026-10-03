@@ -90,16 +90,19 @@ cross-session state lives in `~/exomemory/`, never here.
   case-insensitive). `GHOSTWRITER_STE` is retired and refused at startup.
   There are no legacy `HEMMINGWAY_*` aliases.
 - `style` (string, default `"none"`) is the server-side default for the
-  per-call `style` argument, validated against the registry at startup:
-  with `style = "ste"`, calls that omit the argument compose in ASD-STE100;
-  an explicit `style` from the caller — including `"none"` — always wins.
+  per-call `style` argument on the four model tools, validated against the
+  registry at startup: with `style = "ste"`, calls that omit the argument
+  compose in ASD-STE100; an explicit `style` from the caller — including
+  `"none"` — always wins. `style_check` deliberately ignores this key and
+  always defaults to `ste`: its report shape is a deterministic contract
+  (pinned tests), independent of the deployment's writing default.
 - Defaults point at the fleet box (`http://hyper03:8002/v1`); installs
   elsewhere must override `base_url` and `model`.
 
 ## Verify before claiming done
 
 ```sh
-cargo test                    # 58 tests, all must pass
+cargo test                    # 63 tests, all must pass
 cargo clippy --all-targets    # clean, no warnings
 cargo fmt --check             # clean
 cargo build --release         # the deployed artifact
