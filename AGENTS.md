@@ -97,9 +97,12 @@ memory), never here.
   `idle_timeout_secs` (file or env) above 86,400 (one day) are refused at
   startup, and the error names the cap.
 - `style` (string, default `"none"`) is the server-side default for the
-  per-call `style` argument, validated against the registry at startup:
-  with `style = "ste"`, calls that omit the argument compose in ASD-STE100;
-  an explicit `style` from the caller — including `"none"` — always wins.
+  per-call `style` argument on the four model tools, validated against the
+  registry at startup: with `style = "ste"`, calls that omit the argument
+  compose in ASD-STE100; an explicit `style` from the caller — including
+  `"none"` — always wins. `style_check` deliberately ignores this key and
+  always defaults to `ste`: its report shape is a deterministic contract
+  (pinned tests), independent of the deployment's writing default.
 - Defaults point at the fleet box (`http://hyper03:8002/v1`); installs
   elsewhere must override `base_url` and `model`.
 
