@@ -162,6 +162,11 @@ fn mask(text: &str) -> Vec<char> {
         let t = line.trim_start();
         if t.starts_with("```") || t.starts_with("~~~") {
             in_fence = !in_fence;
+            // The delimiter line is fence syntax, not prose: mask it too,
+            // or an info string like ```utilize gets checked as a word.
+            for c in &mut buf[base..base + line.chars().count()] {
+                *c = ' ';
+            }
             base += line.chars().count() + 1;
             continue;
         }
@@ -465,29 +470,35 @@ fn ste_words(s: &str) -> usize {
     count
 }
 
-/// First occurrence of the (ASCII) `needle` in the lowercased masked-line
-/// char buffer, aligned to word boundaries: an alphanumeric neighbour on
-/// either side disqualifies the match, while `-` and `/` inside a needle
-/// stay word characters (see [`WordRule`]). Returns a CHAR index — the
-/// buffer is built with ASCII-only lowering, so positions map 1:1 onto the
-/// masked line and the original line.
-fn find_word(hay: &[char], needle: &str) -> Option<usize> {
+/// Every non-overlapping occurrence of the (ASCII) `needle` in the
+/// lowercased masked-line char buffer, aligned to word boundaries: an
+/// alphanumeric neighbour on either side disqualifies the match, while
+/// `-` and `/` inside a needle stay word characters (see [`WordRule`]).
+/// Returns CHAR indices — the buffer is built with ASCII-only lowering,
+/// so positions map 1:1 onto the masked line and the original line.
+/// Every occurrence is reported; the (line, rule, quote) dedup in
+/// [`check_with`] collapses identical repeats to one finding.
+fn find_words(hay: &[char], needle: &str) -> Vec<usize> {
     let needle: Vec<char> = needle.chars().collect();
+    let mut hits = Vec::new();
     if needle.is_empty() || needle.len() > hay.len() {
-        return None;
+        return hits;
     }
-    for i in 0..=hay.len() - needle.len() {
-        if hay[i..i + needle.len()] != needle[..] {
-            continue;
+    let mut i = 0usize;
+    while i + needle.len() <= hay.len() {
+        if hay[i..i + needle.len()] == needle[..] {
+            let before_ok = i == 0 || !hay[i - 1].is_ascii_alphanumeric();
+            let after = hay.get(i + needle.len()).copied();
+            let after_ok = !after.is_some_and(|c| c.is_ascii_alphanumeric());
+            if before_ok && after_ok {
+                hits.push(i);
+                i += needle.len();
+                continue;
+            }
         }
-        let before_ok = i == 0 || !hay[i - 1].is_ascii_alphanumeric();
-        let after = hay.get(i + needle.len()).copied();
-        let after_ok = !after.is_some_and(|c| c.is_ascii_alphanumeric());
-        if before_ok && after_ok {
-            return Some(i);
-        }
+        i += 1;
     }
-    None
+    hits
 }
 
 /// Join a paragraph's masked lines, split into sentences, and report each
@@ -649,7 +660,7 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
         }
         if rules.latin {
             for (needle, fix) in LATIN {
-                if let Some(pos) = find_word(&hay, needle) {
+                for pos in find_words(&hay, needle) {
                     findings.push(Finding {
                         line: lineno,
                         quote: clip(&quote_at(&ochars, pos, needle)),
@@ -661,7 +672,7 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
         }
         if rules.contractions {
             for (needle, fix) in CONTRACTIONS {
-                if let Some(pos) = find_word(&hay, needle) {
+                for pos in find_words(&hay, needle) {
                     findings.push(Finding {
                         line: lineno,
                         quote: clip(&quote_at(&ochars, pos, needle)),
@@ -672,7 +683,7 @@ pub fn check_with(text: &str, rules: &Rules) -> Vec<Finding> {
             }
         }
         for w in rules.words {
-            if let Some(pos) = find_word(&hay, w.needle) {
+            for pos in find_words(&hay, w.needle) {
                 findings.push(Finding {
                     line: lineno,
                     quote: clip(&quote_at(&ochars, pos, w.needle)),
@@ -1089,6 +1100,54 @@ mod tests {
         assert!(
             elapsed.as_secs() < 1,
             "58 KB url-heavy single line took {elapsed:?} — masking regressed to quadratic"
+        );
+    }
+
+    // --- Ported from origin/main (debabe8a) --------------------------------
+
+    /// Banned-word rules report every textual variant on a line (the old
+    /// first-match-only missed the second); the (line, rule, quote)
+    /// report identity collapses identical repeats to one finding.
+    #[test]
+    fn every_occurrence_is_reported() {
+        let f = check_with(
+            "Simply configure it. simply start it.",
+            &crate::styles::GOOGLE_RULES,
+        );
+        let n = f.iter().filter(|x| x.rule == "google-tone").count();
+        assert_eq!(n, 2, "expected one finding per variant: {f:?}");
+        let f = check_with(
+            "Simply configure it. Simply start it.",
+            &crate::styles::GOOGLE_RULES,
+        );
+        let n = f.iter().filter(|x| x.rule == "google-tone").count();
+        assert_eq!(n, 1, "identical repeats collapse under dedup: {f:?}");
+    }
+
+    /// The dictionary loop keeps its own all-occurrence behaviour from
+    /// before the fork: word_spans already visits every token, so two
+    /// different unapproved variants on one line both report.
+    #[test]
+    fn dictionary_reports_every_variant_on_a_line() {
+        let f = check("utilize the fitting and initiate the pump.");
+        let vocab: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "ste-vocab")
+            .map(|x| x.quote.as_str())
+            .collect();
+        // utilize, initiate, AND pump are all unapproved dictionary words;
+        // the report is sorted by (line, rule, quote).
+        assert_eq!(vocab, vec!["initiate", "pump", "utilize"], "{vocab:?}");
+    }
+
+    /// A fence delimiter line is syntax, not prose: an info string made
+    /// of an unapproved word must not be checked as a word.
+    #[test]
+    fn fence_delimiter_lines_are_masked() {
+        let f = check("```utilize\nplain text here\n```");
+        assert!(
+            f.iter().all(|x| !x.quote.contains("utilize")),
+            "fence info string was checked as prose: {f:?}"
         );
     }
 }
