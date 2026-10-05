@@ -43,6 +43,37 @@ Adding a standard takes four steps. The module doc of `src/styles.rs` lists them
 4. Keep `cargo test` green.
 Then live-check the guide against the model before shipping it.
 
+## Installing with Homebrew
+
+Prebuilt-by-you, from source, via the author's tap:
+
+```sh
+brew tap jgavinray/tap
+brew trust --formula jgavinray/tap/ghostwriter   # Homebrew 6.x tap-trust gate
+brew install jgavinray/tap/ghostwriter
+```
+
+`brew install jgavinray/homebrew-tap/ghostwriter` also works and auto-taps,
+trusting only that formula. The formula compiles the tagged source with
+brew's own Rust toolchain against the committed `Cargo.lock`, offline, so
+what you install is exactly the tagged tree (verified by its SHA-256). The
+result is `$(brew --prefix)/bin/ghostwriter`.
+
+Homebrew never writes your configuration: the built-in default is a loopback
+placeholder, not a server. Before first use, copy the shipped example and
+point it at your writing-model server (the file also lands at
+`$(brew --prefix)/share/ghostwriter/config.example.toml`):
+
+```sh
+mkdir -p ~/.config/ghostwriter
+cp "$(brew --prefix)/share/ghostwriter/config.example.toml" ~/.config/ghostwriter/config.toml
+$EDITOR ~/.config/ghostwriter/config.toml
+ghostwriter --self-check
+```
+
+Or skip the file and set `GHOSTWRITER_BASE_URL` / `GHOSTWRITER_MODEL` in the
+MCP client's server entry instead. See [Configuration](#configuration).
+
 ## Building
 
 Rust (stable) is the only requirement. The result is one static binary for macOS and Linux.
