@@ -1,0 +1,48 @@
+# Example ghostwriter configuration.
+#
+# Copy to ~/.config/ghostwriter/config.toml (the same path on macOS and
+# Linux) and edit — or pass the path explicitly with
+# `ghostwriter --config <path>`. Every key is optional: a file may set
+# only what it wants to move off the built-in defaults. Unknown keys are
+# refused at startup, so a typo never silently reverts a setting.
+#
+# Resolution order: built-in defaults < this file < GHOSTWRITER_*
+# environment variables (GHOSTWRITER_BASE_URL, GHOSTWRITER_MODEL,
+# GHOSTWRITER_TEMPERATURE, GHOSTWRITER_TIMEOUT_SECS,
+# GHOSTWRITER_IDLE_TIMEOUT_SECS, GHOSTWRITER_STYLE).
+#
+# Verify what a given configuration resolves to without starting the
+# server: `ghostwriter --self-check` prints one JSON line and exits 0.
+
+# The OpenAI-compatible endpoint of your writing-model server — the
+# `/v1` base, no trailing slash needed. The built-in default is only a
+# loopback placeholder so a fresh install stays functional offline;
+# point this at the real server (http:// or https:// — HTTPS works with
+# the platform trust store out of the box).
+base_url = "http://127.0.0.1:8002/v1"
+
+# Served model id on that endpoint.
+model = "hemmingway-1"
+
+# Sampling temperature; clamped to 0.0..2.0.
+temperature = 0.3
+
+# Budget for one whole generation attempt, queueing included: a busy
+# engine holds a queued request in silence until its first token.
+# Must not exceed 86400 (one day), must stay greater than
+# idle_timeout_secs, and your MCP client's per-server timeout must
+# exceed it — otherwise the client reports a transport timeout before
+# the server can return a readable error.
+timeout_secs = 900
+
+# Silence that declares an already-streaming response dead; queueing
+# before the first token is exempt (only timeout_secs bounds that).
+# Must not exceed 86400 (one day).
+idle_timeout_secs = 60
+
+# Server-side default for the per-call `style` argument of the model
+# tools: "none" for the house style alone, or a registered standard id
+# such as "ste" (ASD-STE100), "google", "microsoft", "diataxis". An
+# explicit `style` from the caller always wins. An unknown id is a
+# startup error that lists the valid ids.
+style = "ste"

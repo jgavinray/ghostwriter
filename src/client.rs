@@ -677,6 +677,38 @@ mod tests {
         );
     }
 
+    /// The HTTPS pin: with the rustls backend wired in, an `https://`
+    /// base_url must reach a real TLS connection attempt — never the
+    /// old no-TLS-backend failure path, which surfaced at client
+    /// construction ("building HTTP client failed", reqwest's builder
+    /// error text "TLS backend cannot be initialized"). Nothing listens
+    /// on port 9 (discard, always refused): if rustls is really in the
+    /// stack the attempt dies as a connection-level fault. If the
+    /// feature ever regresses away, `Client::new` fails first and this
+    /// test dies on the unwrap instead.
+    #[tokio::test]
+    async fn https_base_url_attempts_tls_instead_of_refusing_to_build() {
+        let cfg = http_config("https://127.0.0.1:9/v1".into());
+        let client = Client::new(&cfg)
+            .expect("client with an https base_url must build once rustls is wired in");
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        // The exact Retryable connection-fault path of `try_once`: the
+        // send failed before any response byte (port 9 is always
+        // refused), so both attempts ran and the message names the
+        // url. A no-TLS-backend build instead dies in `Client::new`
+        // ("building HTTP client failed" / "TLS backend cannot be
+        // initialized") and never reaches this text.
+        assert!(
+            err.contains("request to https://127.0.0.1:9/v1/chat/completions failed")
+                && err.contains("after 2 attempts"),
+            "expected the connection-fault path of a real TLS attempt: {err}"
+        );
+        assert!(
+            !err.contains("TLS backend") && !err.contains("building HTTP client"),
+            "the no-TLS-backend failure path is back: {err}"
+        );
+    }
+
     /// The SseTail caps are enforced directly, without a server: a line
     /// that never terminates must not buffer without bound…
     #[test]

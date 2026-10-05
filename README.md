@@ -65,7 +65,7 @@ A missing default config file is fine. The defaults stand. A `--config` path tha
 
 ```toml
 # ~/.config/ghostwriter/config.toml
-base_url = "http://hyper03:8002/v1"
+base_url = "http://127.0.0.1:8002/v1"
 model = "hemmingway-1"
 temperature = 0.3
 timeout_secs = 900
@@ -78,8 +78,13 @@ style = "none"
 `timeout_secs` and `idle_timeout_secs` must not exceed 86,400 (one day):
 larger values are refused at startup, and the error names the cap.
 
-The built-in defaults point at the default writing-model server
-(`http://hyper03:8002/v1`, model `hemmingway-1`). An install anywhere else must set `base_url` and `model` in the file or the environment.
+The built-in defaults are a loopback placeholder (`http://127.0.0.1:8002/v1`,
+model `hemmingway-1`) so a fresh install resolves cleanly — they are not a
+working server. Point `base_url` at your writing-model server (the fleet box
+is configured here, never in code) and set `model` to the served model id, in
+the file or the environment. `https://` endpoints are supported: TLS rides on
+rustls with the platform trust store. `assets/config.example.toml` in the
+repository is a commented, copy-able sample of the same six keys.
 
 Verify resolution without starting the server:
 

@@ -103,8 +103,13 @@ memory), never here.
   `"none"` — always wins. `style_check` deliberately ignores this key and
   always defaults to `ste`: its report shape is a deterministic contract
   (pinned tests), independent of the deployment's writing default.
-- Defaults point at the fleet box (`http://hyper03:8002/v1`); installs
-  elsewhere must override `base_url` and `model`.
+- Built-in defaults are a loopback placeholder (`http://127.0.0.1:8002/v1`,
+  model `hemmingway-1`): never an internal hostname, so a public artifact
+  ships nothing private. The fleet box is configured via the config file or
+  `GHOSTWRITER_BASE_URL`, never in code; every real deployment overrides
+  `base_url` and `model`. `https://` endpoints ride on the reqwest `rustls`
+  feature with the platform trust store (exactly one TLS backend; no
+  openssl/native-tls).
 
 ## Verify before claiming done
 

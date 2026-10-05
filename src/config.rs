@@ -3,7 +3,11 @@
 //!
 //! Layering, lowest to highest:
 //!
-//! 1. Built-in defaults (the fleet hemmingway-1 box).
+//! 1. Built-in defaults: a loopback placeholder — a fresh install with no
+//!    config resolves and self-checks fine, but only a real deployment
+//!    reaches the model. The writing-model server (the fleet box) is
+//!    configured via the config file or the environment, never a code
+//!    default.
 //! 2. Config file, TOML: `~/.config/ghostwriter/config.toml` — the same
 //!    path on macOS and Linux — or the path given with `--config`. A
 //!    missing default file is fine and the defaults stand; an explicit
@@ -22,7 +26,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-pub const DEFAULT_BASE_URL: &str = "http://hyper03:8002/v1";
+/// Loopback placeholder — NOT the fleet box. The writing-model server is
+/// always configured via the config file or `GHOSTWRITER_BASE_URL`; a
+/// public install must never carry an internal hostname in its binary.
+pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8002/v1";
 pub const DEFAULT_MODEL: &str = "hemmingway-1";
 pub const DEFAULT_TEMPERATURE: f32 = 0.3;
 /// Overall budget for one generation attempt (request sent to last
@@ -255,7 +262,15 @@ mod tests {
     #[test]
     fn defaults_resolve() {
         let c = build(None, None, None, None, None, None).unwrap();
-        assert_eq!(c.base_url, "http://hyper03:8002/v1");
+        assert_eq!(c.base_url, "http://127.0.0.1:8002/v1");
+        // The built-in default must never carry the internal fleet
+        // hostname into a public artifact — the assertion is on the
+        // resolved value, so a regression to the old constant fails here.
+        assert!(
+            !c.base_url.contains("hyper03"),
+            "default base_url names an internal host: {}",
+            c.base_url
+        );
         assert_eq!(c.model, "hemmingway-1");
         assert_eq!(c.temperature, 0.3);
         assert_eq!(c.timeout, Duration::from_secs(900));
@@ -476,5 +491,53 @@ mod tests {
         let err = build(None, None, None, Some(86_400), Some(86_400), None).unwrap_err();
         assert!(err.contains("must be shorter than timeout"), "{err}");
         assert!(!err.contains("must not exceed"), "{err}");
+    }
+
+    /// An `https://` base_url is a first-class deployment shape (the
+    /// model server may sit behind TLS): resolution must accept it
+    /// verbatim, not only the plain-http fleet form.
+    #[test]
+    fn https_base_url_is_accepted() {
+        let c = build(
+            Some("https://models.example.com:8443/v1/".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(c.base_url, "https://models.example.com:8443/v1");
+    }
+
+    /// The shipped example config must survive the real deserializer —
+    /// a sample that the loader itself would refuse is worse than none.
+    /// Every one of the six keys must be present and resolve to the
+    /// value the file states, and the example must not point at an
+    /// internal host.
+    #[test]
+    fn shipped_example_config_resolves() {
+        let text = include_str!("../assets/config.example.toml");
+        let f: FileConfig =
+            toml::from_str(text).expect("assets/config.example.toml must parse under FileConfig");
+        assert_eq!(f.base_url.as_deref(), Some("http://127.0.0.1:8002/v1"));
+        assert_eq!(f.model.as_deref(), Some("hemmingway-1"));
+        assert_eq!(f.temperature, Some(0.3));
+        assert_eq!(f.timeout_secs, Some(900));
+        assert_eq!(f.idle_timeout_secs, Some(60));
+        assert_eq!(f.style.as_deref(), Some("ste"));
+        assert!(!text.contains("hyper03"), "example names an internal host");
+        let c = build(
+            f.base_url,
+            f.model,
+            f.temperature,
+            f.timeout_secs,
+            f.idle_timeout_secs,
+            f.style,
+        )
+        .unwrap();
+        assert_eq!(c.base_url, "http://127.0.0.1:8002/v1");
+        assert_eq!(c.model, "hemmingway-1");
+        assert_eq!(c.style, "ste");
     }
 }
