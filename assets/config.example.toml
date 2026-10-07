@@ -41,8 +41,12 @@ timeout_secs = 900
 idle_timeout_secs = 60
 
 # Server-side default for the per-call `style` argument of the model
-# tools: "none" for the house style alone, or a registered standard id
-# such as "ste" (ASD-STE100), "google", "microsoft", "diataxis". An
-# explicit `style` from the caller always wins. An unknown id is a
-# startup error that lists the valid ids.
-style = "ste"
+# tools. Valid ids: "none" (the house style alone — the shipped
+# default, set here so copying the example changes nothing you were
+# not already getting) or a registered standard id, which adds that
+# standard's rules to the system prompt of every model-backed call
+# that omits `style`: "ste" (ASD-STE100), "google", "microsoft",
+# "diataxis". An explicit `style` from the caller always wins, and an
+# unknown id is a startup error that lists the valid ids. To make a
+# standard the deployment default, set it here (or GHOSTWRITER_STYLE).
+style = "none"

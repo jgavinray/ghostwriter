@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(f.temperature, Some(0.3));
         assert_eq!(f.timeout_secs, Some(900));
         assert_eq!(f.idle_timeout_secs, Some(60));
-        assert_eq!(f.style.as_deref(), Some("ste"));
+        assert_eq!(f.style.as_deref(), Some("none"));
         assert!(!text.contains("hyper03"), "example names an internal host");
         let c = build(
             f.base_url,
@@ -538,6 +538,6 @@ mod tests {
         .unwrap();
         assert_eq!(c.base_url, "http://127.0.0.1:8002/v1");
         assert_eq!(c.model, "hemmingway-1");
-        assert_eq!(c.style, "ste");
+        assert_eq!(c.style, "none");
     }
 }

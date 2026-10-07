@@ -368,7 +368,12 @@ const CONTRACTIONS: &[(&str, &str)] = &[
 
 /// Sentence-length caps from the spec: 20 words for an instruction, 25 for
 /// descriptive prose. A sentence whose first word is not a subject marker
-/// is treated as an instruction.
+/// is treated as an instruction. Known heuristic gap: a first word is a
+/// single-word classifier, so a purpose-clause instruction ("To configure
+/// the relay, ...") and a prepositional description ("In the test, ...")
+/// open alike and both take the 25-word cap. Tightening the list would
+/// false-positive the descriptive half; the 20-vs-25 call on such openers
+/// stays the model's judgment, per the engine's silence-is-judgment rule.
 const MAX_INSTRUCTION_WORDS: usize = 20;
 const MAX_DESCRIBE_WORDS: usize = 25;
 
@@ -495,12 +500,17 @@ fn find_words(hay: &[char], needle: &str) -> Vec<usize> {
                 i += needle.len();
                 continue;
             }
+            // A character-match whose boundaries disqualify it falls
+            // through to `i += 1` on purpose: scanning re-enters at the
+            // shifted starts a skipped match would hide. `str::match_indices`
+            // instead skips past every character-match, boundary or not —
+            // an intentional divergence, pinned by
+            // `disqualified_match_reenters_at_shifted_start`.
         }
         i += 1;
     }
     hits
 }
-
 /// Join a paragraph's masked lines, split into sentences, and report each
 /// with the 1-based line its first character sits on.
 fn collect_sentences(para: &[(usize, String)]) -> Vec<(usize, String)> {
@@ -856,6 +866,33 @@ mod tests {
         assert!(f.iter().any(|x| x.rule == "ste-semicolon"));
         assert!(f.iter().any(|x| x.rule == "ste-latin"));
         assert!(f.iter().any(|x| x.rule == "ste-contraction"));
+    }
+
+    /// The scanner-divergence pin (paired with the `i += 1` comment in
+    /// `find_words`): `"xshe'she's ok".match_indices("she's")` finds
+    /// only the match at char 1 and skips past it, so the shifted start
+    /// at char 5 — preceded by the apostrophe, followed by a space —
+    /// stays invisible to upstream's skip-past semantics (its boundary
+    /// filter then qualifies nothing). The port re-enters one character
+    /// in instead, and the qualified occurrence at 5 is found: the
+    /// engine reports the contraction. Making the disqualified branch
+    /// skip past the match like `match_indices` turns this finding into
+    /// a clean report — mutation-verified 2026-10-07.
+    #[test]
+    fn disqualified_match_reenters_at_shifted_start() {
+        let hay: Vec<char> = "xshe'she's ok".chars().collect();
+        assert_eq!(find_words(&hay, "she's"), vec![5]);
+        let f = check("xshe'she's ok");
+        let contractions: Vec<&Finding> =
+            f.iter().filter(|x| x.rule == "ste-contraction").collect();
+        assert_eq!(
+            contractions.len(),
+            1,
+            "expected exactly one ste-contraction finding: {f:?}"
+        );
+        assert_eq!(contractions[0].quote, "she's", "{f:?}");
+        assert_eq!(contractions[0].fix, "she is", "{f:?}");
+        assert_eq!(contractions[0].line, 1, "{f:?}");
     }
 
     #[test]

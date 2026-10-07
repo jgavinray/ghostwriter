@@ -44,6 +44,25 @@ pub struct Client {
     http_health: reqwest::Client,
 }
 
+/// The full reqwest cause chain. `Display` for a request error names
+/// only the kind ("error sending request for url (...)"); the detail
+/// that distinguishes a real TLS handshake failure ("tls handshake
+/// eof", tokio-rustls) from a no-TLS-backend build that never attempts
+/// one ("invalid URL, scheme is not http", hyper-util's plain
+/// connector) lives in the sources. Surfacing them makes the failure
+/// reportable to the caller — and is what lets the HTTPS pin below
+/// discriminate TLS.
+fn err_chain(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut parts = vec![e.to_string()];
+    let mut src = e.source();
+    while let Some(s) = src {
+        parts.push(s.to_string());
+        src = s.source();
+    }
+    parts.join(": ")
+}
+
 impl Client {
     pub fn new(cfg: &Config) -> Result<Client, String> {
         let http = reqwest::Client::builder()
@@ -105,7 +124,7 @@ impl Client {
     async fn try_once(&self, cfg: &Config, body: &Value) -> Result<Completion, AttemptError> {
         let url = format!("{}/chat/completions", cfg.base_url);
         let resp = self.http.post(&url).json(body).send().await.map_err(|e| {
-            let detail = format!("request to {url} failed: {e}");
+            let detail = format!("request to {url} failed: {}", err_chain(&e));
             // The overall timeout expiring before headers means the
             // engine is busy with this very request; a resend queues
             // the same work a second time.
@@ -677,36 +696,112 @@ mod tests {
         );
     }
 
-    /// The HTTPS pin: with the rustls backend wired in, an `https://`
-    /// base_url must reach a real TLS connection attempt — never the
-    /// old no-TLS-backend failure path, which surfaced at client
-    /// construction ("building HTTP client failed", reqwest's builder
-    /// error text "TLS backend cannot be initialized"). Nothing listens
-    /// on port 9 (discard, always refused): if rustls is really in the
-    /// stack the attempt dies as a connection-level fault. If the
-    /// feature ever regresses away, `Client::new` fails first and this
-    /// test dies on the unwrap instead.
+    /// The HTTPS pin, with a discriminator that actually discriminates
+    /// TLS. Two independent guards, both mutation-verified (2026-10-07)
+    /// against a /tmp copy with `"rustls"` removed from the reqwest
+    /// feature list in Cargo.toml:
+    ///
+    /// 1. Compile-time: the builder call below names
+    ///    `ClientBuilder::tls_backend_rustls`, which reqwest 0.13.5
+    ///    exposes only under its `rustls` feature (`__rustls` cfg).
+    ///    Drop the feature and this test stops compiling — loudly, at
+    ///    the type check, not as a passing assertion.
+    /// 2. Runtime: a real TLS attempt against a plain-TCP endpoint that
+    ///    accepts the connection, lets rustls send its ClientHello, then
+    ///    hangs up mid-handshake, observed to fail with
+    ///    "tls handshake eof". A no-TLS-backend build never reaches a
+    ///    handshake at all: reqwest's connector is the plain HTTP one
+    ///    and hyper-util refuses the `https` scheme with "invalid URL,
+    ///    scheme is not http" (both texts observed on this host, rustls
+    ///    present vs removed). The endpoint is a listener that stays
+    ///    open, so both resent attempts reach it and the connection-
+    ///    fault shape ("after 2 attempts") still holds.
     #[tokio::test]
     async fn https_base_url_attempts_tls_instead_of_refusing_to_build() {
-        let cfg = http_config("https://127.0.0.1:9/v1".into());
+        // rustls-gated: `tls_backend_rustls` does not exist on the
+        // builder without the reqwest `rustls` feature. This call IS
+        // the compile-time half of the pin — deleting the feature turns
+        // this test into a build failure, so it can never pass while
+        // quietly not being a TLS build.
+        let _ = reqwest::Client::builder().tls_backend_rustls();
+
+        let (port, stop) = spawn_fake_tls_endpoint().await;
+        let cfg = http_config(format!("https://127.0.0.1:{port}/v1"));
         let client = Client::new(&cfg)
             .expect("client with an https base_url must build once rustls is wired in");
         let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
-        // The exact Retryable connection-fault path of `try_once`: the
-        // send failed before any response byte (port 9 is always
-        // refused), so both attempts ran and the message names the
-        // url. A no-TLS-backend build instead dies in `Client::new`
-        // ("building HTTP client failed" / "TLS backend cannot be
-        // initialized") and never reaches this text.
+        stop.store(true, Ordering::SeqCst);
+
+        // The Retryable connection-fault shape of `try_once`: the send
+        // died before any response byte, so both attempts ran and the
+        // message names the url.
         assert!(
-            err.contains("request to https://127.0.0.1:9/v1/chat/completions failed")
+            err.contains("request to https://127.0.0.1:")
+                && err.contains("/v1/chat/completions failed")
                 && err.contains("after 2 attempts"),
             "expected the connection-fault path of a real TLS attempt: {err}"
         );
+        // The TLS-only half: this text comes from the rustls handshake
+        // and cannot appear without a TLS backend.
         assert!(
-            !err.contains("TLS backend") && !err.contains("building HTTP client"),
-            "the no-TLS-backend failure path is back: {err}"
+            err.contains("tls handshake eof"),
+            "no TLS handshake was ever attempted: {err}"
         );
+        // The no-TLS-build marker, observed byte-for-byte when the
+        // feature is removed: its presence means we are back to the
+        // plain connector refusing the https scheme before any wire
+        // traffic.
+        assert!(
+            !err.contains("invalid URL, scheme is not http"),
+            "the no-TLS-backend build path is back: {err}"
+        );
+    }
+
+    /// A listener that accepts, drains the client's ClientHello, then
+    /// hangs up without ever answering the handshake. It is not a TLS
+    /// server — that is the point: a real TLS client dies mid-handshake
+    /// against it ("tls handshake eof"), while a no-TLS-build connector
+    /// refuses the url before writing anything. The drain matters: close
+    /// with the ClientHello still unread in the socket makes the kernel
+    /// send RST, and the client would report a reset instead of the
+    /// handshake EOF. Kept accepting until `stop` flips so the resent
+    /// attempt hits the same behaviour. Returns the port and the stop
+    /// flag.
+    async fn spawn_fake_tls_endpoint() -> (u16, Arc<AtomicBool>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        tokio::spawn(async move {
+            while !stopping.load(Ordering::SeqCst) {
+                match listener.accept().await {
+                    Ok((mut sock, _)) => {
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 4096];
+                            // Read until quiet: the client writes its
+                            // whole ClientHello in one go, then waits
+                            // for a ServerHello that never comes.
+                            loop {
+                                match tokio::time::timeout(
+                                    Duration::from_millis(150),
+                                    sock.read(&mut buf),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                                    Ok(Ok(_)) => {}
+                                }
+                            }
+                            // FIN, not RST: the reader saw everything.
+                            let _ = sock.shutdown().await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, stop)
     }
 
     /// The SseTail caps are enforced directly, without a server: a line

@@ -110,6 +110,8 @@ memory), never here.
   `base_url` and `model`. `https://` endpoints ride on the reqwest `rustls`
   feature with the platform trust store (exactly one TLS backend; no
   openssl/native-tls).
+- Public history is a public artifact too: commit and tag messages must
+  carry no internal codenames or internal review-artifact paths.
 
 ## Verify before claiming done
 
