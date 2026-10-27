@@ -72,7 +72,8 @@ ghostwriter --self-check
 ```
 
 Or skip the file and set `GHOSTWRITER_BASE_URL` / `GHOSTWRITER_MODEL` in the
-MCP client's server entry instead. See [Configuration](#configuration).
+MCP client's server entry instead, plus `GHOSTWRITER_API_KEY` when the endpoint
+requires a bearer token. See [Configuration](#configuration).
 
 ## Building
 
@@ -90,7 +91,7 @@ Configuration resolves once at startup. It uses layers from lowest to highest pr
 
 1. Built-in defaults.
 2. The config file: `~/.config/ghostwriter/config.toml` (the same path on macOS and Linux) or the file named by `--config <path>`.
-3. Environment variables: `GHOSTWRITER_BASE_URL`, `GHOSTWRITER_MODEL`, `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`, `GHOSTWRITER_IDLE_TIMEOUT_SECS`, `GHOSTWRITER_STYLE`.
+3. Environment variables: `GHOSTWRITER_BASE_URL`, `GHOSTWRITER_MODEL`, `GHOSTWRITER_API_KEY`, `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`, `GHOSTWRITER_IDLE_TIMEOUT_SECS`, `GHOSTWRITER_STYLE`.
 
 A missing default config file is fine. The defaults stand. A `--config` path that does not exist is a startup error. Unknown keys in the config file are a startup error. A typo never silently reverts a setting to its default.
 
@@ -98,6 +99,7 @@ A missing default config file is fine. The defaults stand. A `--config` path tha
 # ~/.config/ghostwriter/config.toml
 base_url = "http://127.0.0.1:8002/v1"
 model = "hemmingway-1"
+# api_key = ""          # bearer token; omit it for an unauthenticated endpoint
 temperature = 0.3
 timeout_secs = 900
 idle_timeout_secs = 60
@@ -115,7 +117,23 @@ working server. Point `base_url` at your writing-model server (the fleet box
 is configured here, never in code) and set `model` to the served model id, in
 the file or the environment. `https://` endpoints are supported: TLS rides on
 rustls with the platform trust store. `assets/config.example.toml` in the
-repository is a commented, copy-able sample of the same six keys.
+repository is a commented, copy-able sample of the same keys.
+
+An endpoint that requires a bearer token needs `api_key` in the file, or
+`GHOSTWRITER_API_KEY` in the environment (the variable wins over the file, so
+an MCP client's `env` block can hold the token without copying it into the
+config file). When it is set, every request carries
+`Authorization: Bearer <api_key>`, including the `model_health` probe. Unset
+or empty sends no header, which is what the unauthenticated loopback fleet
+engines expect. A blank value counts as unset, surrounding whitespace is
+trimmed, and a value that cannot travel in an HTTP header is refused at
+startup. The token never appears in `--self-check` output (it reports only
+`api_key_set`) or in an error message.
+
+ghostwriter runs no commands from configuration. A client-side `!command` env
+indirection such as `"!cat ~/.token"` must be resolved by the MCP client or a
+wrapper script before the server starts; an `api_key` beginning with `!` is
+refused at startup rather than sent as a literal token.
 
 Verify resolution without starting the server:
 

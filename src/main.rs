@@ -8,9 +8,10 @@
 //! `~/.config/ghostwriter/config.toml` on macOS and Linux alike), then by
 //! `GHOSTWRITER_*` environment variables (see `config::load`). `--self-check`
 //! resolves the configuration, prints ONE JSON line
-//! `{base_url, model, temperature, timeout_secs, idle_timeout_secs, style}` to
-//! stdout, and exits 0 — configuration that cannot resolve is never served
-//! with.
+//! `{base_url, model, api_key_set, temperature, timeout_secs,
+//! idle_timeout_secs, style}` to stdout, and exits 0 — configuration that
+//! cannot resolve is never served with. `api_key_set` reports only whether a
+//! bearer token resolved: the token itself never leaves the process.
 
 use std::path::PathBuf;
 use std::process::exit;
@@ -56,9 +57,10 @@ async fn main() {
     };
     if self_check {
         println!(
-            "{{\"base_url\":{},\"model\":{},\"temperature\":{},\"timeout_secs\":{},\"idle_timeout_secs\":{},\"style\":{}}}",
+            "{{\"base_url\":{},\"model\":{},\"api_key_set\":{},\"temperature\":{},\"timeout_secs\":{},\"idle_timeout_secs\":{},\"style\":{}}}",
             serde_json::Value::from(config.base_url),
             serde_json::Value::from(config.model),
+            config.api_key.is_some(),
             config.temperature,
             config.timeout.as_secs(),
             config.idle_timeout.as_secs(),

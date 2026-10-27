@@ -841,6 +841,7 @@ mod tests {
         WritingServer::new(Config {
             base_url: "http://127.0.0.1:9".into(),
             model: "test-model".into(),
+            api_key: None,
             temperature: 0.3,
             timeout: std::time::Duration::from_secs(1),
             idle_timeout: std::time::Duration::from_millis(500),
@@ -1197,6 +1198,7 @@ mod tests {
         let s = WritingServer::new(Config {
             base_url: url,
             model: "test-model".into(),
+            api_key: None,
             temperature: 0.3,
             timeout: std::time::Duration::from_secs(5),
             idle_timeout: std::time::Duration::from_secs(5),

@@ -63,14 +63,43 @@ fn err_chain(e: &reqwest::Error) -> String {
     parts.join(": ")
 }
 
+/// 401/403 diagnostics: an authenticated endpoint answers with a bare
+/// status and its own body, which does not tell the caller whether the
+/// token is missing or wrong. Name the repair; never print the token.
+fn auth_hint(status: u16, cfg: &Config) -> &'static str {
+    match (status, cfg.api_key.is_some()) {
+        (401 | 403, false) => {
+            " (the endpoint requires authentication: set api_key in the config file or \
+             GHOSTWRITER_API_KEY)"
+        }
+        (401 | 403, true) => " (the configured api_key was rejected by the endpoint)",
+        _ => "",
+    }
+}
+
 impl Client {
     pub fn new(cfg: &Config) -> Result<Client, String> {
+        // The token is optional: an unauthenticated loopback engine (the
+        // fleet default) gets no Authorization header at all. When one is
+        // configured it rides on EVERY request — completions and health
+        // probes alike — as a default header, never a per-call special
+        // case that a new endpoint could forget.
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(key) = &cfg.api_key {
+            let value =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
+                    "api_key cannot be encoded as an HTTP Authorization header value".to_string()
+                })?;
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
         let http = reqwest::Client::builder()
             .timeout(cfg.timeout)
+            .default_headers(headers.clone())
             .build()
             .map_err(|e| format!("building HTTP client failed: {e}"))?;
         let http_health = reqwest::Client::builder()
             .timeout(cfg.idle_timeout)
+            .default_headers(headers)
             .build()
             .map_err(|e| format!("building health HTTP client failed: {e}"))?;
         Ok(Client { http, http_health })
@@ -146,8 +175,9 @@ impl Client {
                 .await
                 .map_err(AttemptError::Retryable)?;
             let detail = format!(
-                "HTTP {status} from {url}: {}",
-                clip(&String::from_utf8_lossy(&raw))
+                "HTTP {status} from {url}: {}{}",
+                clip(&String::from_utf8_lossy(&raw)),
+                auth_hint(status, cfg)
             );
             return Err(if status == 429 || status >= 500 {
                 AttemptError::Retryable(detail)
@@ -212,8 +242,9 @@ impl Client {
         let (raw, overflowed) = read_capped(&mut resp).await?;
         if status != 200 {
             return Err(format!(
-                "HTTP {status} from {url}: {}",
-                clip(&String::from_utf8_lossy(&raw))
+                "HTTP {status} from {url}: {}{}",
+                clip(&String::from_utf8_lossy(&raw)),
+                auth_hint(status, cfg)
             ));
         }
         if overflowed {
@@ -508,6 +539,7 @@ mod tests {
         Config {
             base_url,
             model: "test-model".into(),
+            api_key: None,
             temperature: 0.3,
             timeout: Duration::from_secs(2),
             idle_timeout: Duration::from_secs(2),
@@ -993,6 +1025,125 @@ mod tests {
         assert_eq!(
             client.list_models(&cfg).await.unwrap(),
             vec!["served-a".to_string(), "served-b".to_string()]
+        );
+    }
+
+    // --- bearer authentication against an authenticated endpoint ---------
+
+    /// Server that records the raw request head it received, then answers
+    /// with `response` verbatim and closes.
+    async fn serve_capturing(response: String) -> (String, Arc<std::sync::Mutex<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 16 * 1024];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                *sink.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = sock.write_all(response.as_bytes()).await;
+            }
+        });
+        (url, seen)
+    }
+
+    /// The configured token must reach both request kinds — a completion
+    /// and the health probe — as `Authorization: Bearer <token>`.
+    #[tokio::test]
+    async fn configured_api_key_rides_completions_and_health() {
+        let sse = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{}{}",
+            sse_chunk("done", Some("stop")),
+            "data: [DONE]\n\n"
+        );
+        let (url, seen) = serve_capturing(sse).await;
+        let mut cfg = http_config(url.clone());
+        cfg.api_key = Some("test-token".into());
+        let client = Client::new(&cfg).unwrap();
+        let c = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap();
+        assert_eq!(c.text, "done");
+        let head = seen.lock().unwrap().to_ascii_lowercase();
+        assert!(
+            head.contains("authorization: bearer test-token"),
+            "completion carried no bearer header: {head}"
+        );
+
+        let models = json!({"object": "list", "data": [{"id": "test-model"}]}).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{models}",
+            models.len()
+        );
+        let (url, seen) = serve_capturing(response).await;
+        let mut cfg = http_config(url.clone());
+        cfg.api_key = Some("test-token".into());
+        let client = Client::new(&cfg).unwrap();
+        assert_eq!(
+            client.list_models(&cfg).await.unwrap(),
+            vec!["test-model".to_string()]
+        );
+        let head = seen.lock().unwrap().to_ascii_lowercase();
+        assert!(
+            head.contains("authorization: bearer test-token"),
+            "health probe carried no bearer header: {head}"
+        );
+    }
+
+    /// Unset token: the request carries no Authorization header at all, so
+    /// unauthenticated loopback engines keep working unchanged.
+    #[tokio::test]
+    async fn unset_api_key_sends_no_authorization_header() {
+        let sse = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{}{}",
+            sse_chunk("done", Some("stop")),
+            "data: [DONE]\n\n"
+        );
+        let (url, seen) = serve_capturing(sse).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap();
+        let head = seen.lock().unwrap().to_ascii_lowercase();
+        assert!(
+            !head.contains("authorization"),
+            "an unset api_key still sent a header: {head}"
+        );
+    }
+
+    /// A 401/403 names the repair: the missing token when none is set, the
+    /// rejected token when one is — and never echoes the token itself.
+    #[tokio::test]
+    async fn auth_failures_name_the_missing_or_rejected_token() {
+        let (url, _hits) = serve(vec![401]).await;
+        let cfg = http_config(url.clone());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(err.contains("requires authentication"), "{err}");
+        assert!(err.contains("GHOSTWRITER_API_KEY"), "{err}");
+
+        let (url, _hits) = serve(vec![403]).await;
+        let mut cfg = http_config(url.clone());
+        cfg.api_key = Some("wrong-token".into());
+        let client = Client::new(&cfg).unwrap();
+        let err = client.complete(&cfg, "s", "u", 16, 0.3).await.unwrap_err();
+        assert!(err.contains("was rejected"), "{err}");
+        assert!(!err.contains("wrong-token"), "the token leaked: {err}");
+    }
+
+    /// A token that cannot be a header value is refused when the client is
+    /// built, not mangled onto the wire. `config::build` normally catches
+    /// this first; a hand-built `Config` must not slip past the guard.
+    #[test]
+    fn client_refuses_an_unencodable_api_key() {
+        let mut cfg = http_config("http://127.0.0.1:9".into());
+        cfg.api_key = Some("bad\nkey".into());
+        let err = Client::new(&cfg)
+            .err()
+            .expect("an unencodable api_key must be refused");
+        assert!(err.contains("Authorization header"), "{err}");
+        assert!(
+            !err.contains("bad"),
+            "the token leaked into the error: {err}"
         );
     }
 }

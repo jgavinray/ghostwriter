@@ -14,12 +14,21 @@
 //!    `--config` that does not exist is a startup error.
 //! 3. Environment: `GHOSTWRITER_BASE_URL`, `GHOSTWRITER_MODEL`,
 //!    `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`,
-//!    `GHOSTWRITER_IDLE_TIMEOUT_SECS`, `GHOSTWRITER_STYLE`, so the mcp.json
-//!    `env` block or a systemd `Environment=` can override the file.
+//!    `GHOSTWRITER_IDLE_TIMEOUT_SECS`, `GHOSTWRITER_STYLE`,
+//!    `GHOSTWRITER_API_KEY`, so the mcp.json `env` block or a systemd
+//!    `Environment=` can override the file.
 //!    `timeout_secs` bounds one whole generation, queueing included (a busy
 //!    engine holds a queued request in total silence until the first token);
 //!    `idle_timeout_secs` kills a stream only after it began emitting and
 //!    then went silent.
+//!
+//! `api_key` is optional and unset by default: unset means no
+//! `Authorization` header at all, which is what unauthenticated loopback
+//! engines expect. When set, every request — completions and the health
+//! probe — carries `Authorization: Bearer <api_key>`. The value is trimmed,
+//! a blank value counts as unset, and a value starting with `!` is refused:
+//! that prefix is the shell-command indirection some MCP clients apply to
+//! `env` values, and this server runs no commands from configuration.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -56,10 +65,14 @@ pub const MAX_TOKENS_CAP: u32 = 32768;
 /// would make the model document half a file and call it complete.
 pub const MAX_SOURCE_BYTES: usize = 400_000;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub base_url: String,
     pub model: String,
+    /// Bearer token for an authenticated endpoint, `None` when the server
+    /// takes unauthenticated requests (the loopback fleet case). Never
+    /// printed: `Debug` reports only whether one is set.
+    pub api_key: Option<String>,
     pub temperature: f32,
     pub timeout: Duration,
     pub idle_timeout: Duration,
@@ -70,6 +83,22 @@ pub struct Config {
     pub style: String,
 }
 
+/// Hand-written so a stray `{:?}` can never put the bearer token into a
+/// log, an error message, or a tool result.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
+            .field("temperature", &self.temperature)
+            .field("timeout", &self.timeout)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("style", &self.style)
+            .finish()
+    }
+}
+
 /// The config-file schema. Every field is optional — a file may set only
 /// what it wants to move off the defaults — and unknown keys are refused,
 /// so a typo (`mode1`) dies at startup instead of silently using defaults.
@@ -78,6 +107,9 @@ pub struct Config {
 struct FileConfig {
     base_url: Option<String>,
     model: Option<String>,
+    /// Bearer token for an authenticated endpoint. Optional; blank counts
+    /// as unset. Refused when it starts with `!` (see `build`).
+    api_key: Option<String>,
     temperature: Option<f32>,
     timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
@@ -142,6 +174,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, String> {
         env_u64("GHOSTWRITER_TIMEOUT_SECS")?.or(file.timeout_secs),
         env_u64("GHOSTWRITER_IDLE_TIMEOUT_SECS")?.or(file.idle_timeout_secs),
         env_str("GHOSTWRITER_STYLE").or(file.style),
+        env_str("GHOSTWRITER_API_KEY").or(file.api_key),
     )
 }
 
@@ -153,6 +186,7 @@ fn build(
     timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
     style: Option<String>,
+    api_key: Option<String>,
 ) -> Result<Config, String> {
     let base_url = base_url
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
@@ -163,6 +197,33 @@ fn build(
             "base_url must start with http:// or https://: {base_url}"
         ));
     }
+    // Blank means "no bearer token" — the unauthenticated loopback shape.
+    // Surrounding whitespace is never part of a token, so it is trimmed;
+    // every other fault is refused at startup, where the typo lives. The
+    // token itself never enters an error message.
+    let api_key = match api_key {
+        Some(raw) => {
+            let key = raw.trim();
+            if key.is_empty() {
+                None
+            } else if key.starts_with('!') {
+                return Err(
+                    "api_key starts with `!`, the shell-command indirection some MCP \
+                     clients apply to `env` values: ghostwriter runs no commands from \
+                     configuration — resolve the token in the client's env block or a \
+                     wrapper script, and pass the literal value"
+                        .to_string(),
+                );
+            } else if reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")).is_err() {
+                return Err("api_key contains characters that cannot travel in an HTTP \
+                     Authorization header (visible ASCII only)"
+                    .to_string());
+            } else {
+                Some(key.to_string())
+            }
+        }
+        None => None,
+    };
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     if model.is_empty() {
         return Err("model must not be empty".to_string());
@@ -211,6 +272,7 @@ fn build(
     Ok(Config {
         base_url,
         model,
+        api_key,
         temperature: temperature.clamp(0.0, 2.0),
         timeout,
         idle_timeout,
@@ -261,7 +323,7 @@ mod tests {
 
     #[test]
     fn defaults_resolve() {
-        let c = build(None, None, None, None, None, None).unwrap();
+        let c = build(None, None, None, None, None, None, None).unwrap();
         assert_eq!(c.base_url, "http://127.0.0.1:8002/v1");
         // The built-in default must never carry the internal fleet
         // hostname into a public artifact — the assertion is on the
@@ -287,6 +349,7 @@ mod tests {
             Some(2),
             Some(0),
             Some("STE".into()),
+            Some("  token-value  ".into()),
         )
         .unwrap();
         assert_eq!(c.base_url, "http://box:9/v1");
@@ -294,19 +357,20 @@ mod tests {
         assert_eq!(c.timeout, Duration::from_secs(2));
         assert_eq!(c.idle_timeout, Duration::from_secs(1)); // floored at 1
         assert_eq!(c.style, "ste"); // normalized to the registered id
-        assert!(build(Some("ftp://box".into()), None, None, None, None, None).is_err());
-        assert!(build(None, Some(String::new()), None, None, None, None).is_err());
-        assert!(build(None, None, Some(f32::NAN), None, None, None).is_err());
-        assert!(build(None, None, Some(f32::INFINITY), None, None, None).is_err());
+        assert_eq!(c.api_key.as_deref(), Some("token-value")); // trimmed
+        assert!(build(Some("ftp://box".into()), None, None, None, None, None, None).is_err());
+        assert!(build(None, Some(String::new()), None, None, None, None, None).is_err());
+        assert!(build(None, None, Some(f32::NAN), None, None, None, None).is_err());
+        assert!(build(None, None, Some(f32::INFINITY), None, None, None, None).is_err());
     }
 
     /// An idle kill that can never fire before the overall deadline is a
     /// dead knob; refuse it at startup, where the typo lives.
     #[test]
     fn idle_must_lose_the_race_to_timeout() {
-        assert!(build(None, None, None, Some(30), Some(60), None).is_err());
-        assert!(build(None, None, None, Some(60), Some(60), None).is_err());
-        assert!(build(None, None, None, Some(61), Some(60), None).is_ok());
+        assert!(build(None, None, None, Some(30), Some(60), None, None).is_err());
+        assert!(build(None, None, None, Some(60), Some(60), None, None).is_err());
+        assert!(build(None, None, None, Some(61), Some(60), None, None).is_ok());
     }
 
     #[test]
@@ -339,16 +403,26 @@ mod tests {
     #[test]
     fn style_defaults_to_none_and_validates_registered_ids() {
         assert_eq!(
-            build(None, None, None, None, None, None).unwrap().style,
+            build(None, None, None, None, None, None, None)
+                .unwrap()
+                .style,
             "none"
         );
         assert_eq!(
-            build(None, None, None, None, None, Some(" Microsoft ".into()))
-                .unwrap()
-                .style,
+            build(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(" Microsoft ".into()),
+                None
+            )
+            .unwrap()
+            .style,
             "microsoft"
         );
-        let err = build(None, None, None, None, None, Some("chicago".into())).unwrap_err();
+        let err = build(None, None, None, None, None, Some("chicago".into()), None).unwrap_err();
         assert!(err.contains("diataxis"), "{err}");
         let f: FileConfig = toml::from_str("style = \"ste\"\n").unwrap();
         assert_eq!(f.style.as_deref(), Some("ste"));
@@ -416,6 +490,98 @@ mod tests {
         assert_eq!(c.style, "none");
     }
 
+    /// GHOSTWRITER_API_KEY must win over the config file's api_key, the
+    /// file value must stand when the environment is quiet, and an
+    /// exported-but-empty value means "unset" — the same rule every other
+    /// env var follows.
+    #[test]
+    fn ghostwriter_api_key_env_overrides_the_file() {
+        let _g = load_lock();
+        let dir = std::env::temp_dir().join("ghostwriter-apikey-env-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "api_key = \"from-file\"\n").unwrap();
+        std::env::set_var("GHOSTWRITER_API_KEY", "from-env");
+        let c = load(Some(&file)).unwrap();
+        assert_eq!(c.api_key.as_deref(), Some("from-env"));
+        std::env::set_var("GHOSTWRITER_API_KEY", "");
+        let c = load(Some(&file)).unwrap();
+        std::env::remove_var("GHOSTWRITER_API_KEY");
+        assert_eq!(c.api_key.as_deref(), Some("from-file"));
+        let f: FileConfig = toml::from_str("api_key = \"file-key\"\n").unwrap();
+        assert_eq!(f.api_key.as_deref(), Some("file-key"));
+    }
+
+    /// A blank api_key is "no bearer token": the unauthenticated loopback
+    /// engines must keep working after a config that mentions the key.
+    #[test]
+    fn blank_api_key_means_no_header() {
+        for blank in ["", "   ", "\t\n"] {
+            let c = build(None, None, None, None, None, None, Some(blank.into())).unwrap();
+            assert_eq!(c.api_key, None, "blank key {blank:?} must mean unset");
+        }
+        assert_eq!(
+            build(None, None, None, None, None, None, Some("k".into()))
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("k")
+        );
+    }
+
+    /// The `!command` indirection belongs to the client, not the server:
+    /// a value carrying that prefix must die at startup with the repair
+    /// named, never be sent as a literal bearer token.
+    #[test]
+    fn api_key_command_indirection_is_refused() {
+        let err = build(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("!cat ~/.token".into()),
+        )
+        .unwrap_err();
+        assert!(err.contains("runs no commands"), "{err}");
+        assert!(err.contains("api_key"), "{err}");
+    }
+
+    /// A token that cannot travel in an HTTP header is refused at startup
+    /// naming the constraint — never silently sent as a mangled header.
+    /// The token itself must not appear in the error.
+    #[test]
+    fn api_key_with_invalid_header_characters_is_refused() {
+        let err = build(None, None, None, None, None, None, Some("bad\nkey".into())).unwrap_err();
+        assert!(err.contains("Authorization header"), "{err}");
+        assert!(
+            !err.contains("bad"),
+            "the token leaked into the error: {err}"
+        );
+    }
+
+    /// `Debug` on Config must report only whether a token is set, so a
+    /// stray debug print cannot leak the bearer token.
+    #[test]
+    fn config_debug_redacts_the_api_key() {
+        let c = build(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("secret-token".into()),
+        )
+        .unwrap();
+        let printed = format!("{c:?}");
+        assert!(printed.contains("<set>"), "{printed}");
+        assert!(!printed.contains("secret-token"), "{printed}");
+        let none = build(None, None, None, None, None, None, None).unwrap();
+        assert!(format!("{none:?}").contains("None"));
+    }
+
     /// N1: an exported-but-empty `GHOSTWRITER_TEMPERATURE` /
     /// `GHOSTWRITER_TIMEOUT_SECS` / `GHOSTWRITER_IDLE_TIMEOUT_SECS` means
     /// "unset" — the same rule `env_str` and `env_present` apply — so the
@@ -474,21 +640,21 @@ mod tests {
     /// never a silent clamp — while one day exactly still resolves.
     #[test]
     fn timeouts_are_capped_at_one_day() {
-        let cap_ok = build(None, None, None, Some(86_400), Some(60), None)
+        let cap_ok = build(None, None, None, Some(86_400), Some(60), None, None)
             .expect("timeout_secs exactly at the cap must resolve");
         assert_eq!(cap_ok.timeout, Duration::from_secs(86_400));
 
-        let err = build(None, None, None, Some(86_401), None, None).unwrap_err();
+        let err = build(None, None, None, Some(86_401), None, None, None).unwrap_err();
         assert!(err.contains("timeout_secs must not exceed"), "{err}");
         assert!(err.contains("86_400") || err.contains("86400"), "{err}");
-        let err = build(None, None, None, None, Some(86_401), None).unwrap_err();
+        let err = build(None, None, None, None, Some(86_401), None, None).unwrap_err();
         assert!(err.contains("idle_timeout_secs must not exceed"), "{err}");
         assert!(err.contains("86_400") || err.contains("86400"), "{err}");
 
         // Both at the cap are individually allowed, so an over-long idle
         // is refused by the idle<timeout rule, not the cap — the two
         // messages stay distinct.
-        let err = build(None, None, None, Some(86_400), Some(86_400), None).unwrap_err();
+        let err = build(None, None, None, Some(86_400), Some(86_400), None, None).unwrap_err();
         assert!(err.contains("must be shorter than timeout"), "{err}");
         assert!(!err.contains("must not exceed"), "{err}");
     }
@@ -505,6 +671,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(c.base_url, "https://models.example.com:8443/v1");
@@ -512,9 +679,9 @@ mod tests {
 
     /// The shipped example config must survive the real deserializer —
     /// a sample that the loader itself would refuse is worse than none.
-    /// Every one of the six keys must be present and resolve to the
-    /// value the file states, and the example must not point at an
-    /// internal host.
+    /// Every key the example sets must resolve to the value the file
+    /// states, `api_key` must stay unset (the sample carries no token),
+    /// and the example must not point at an internal host.
     #[test]
     fn shipped_example_config_resolves() {
         let text = include_str!("../assets/config.example.toml");
@@ -526,6 +693,11 @@ mod tests {
         assert_eq!(f.timeout_secs, Some(900));
         assert_eq!(f.idle_timeout_secs, Some(60));
         assert_eq!(f.style.as_deref(), Some("none"));
+        assert!(f.api_key.is_none(), "the sample must not ship a token");
+        assert!(
+            text.contains("api_key"),
+            "the sample must document the api_key key"
+        );
         assert!(!text.contains("hyper03"), "example names an internal host");
         let c = build(
             f.base_url,
@@ -534,10 +706,12 @@ mod tests {
             f.timeout_secs,
             f.idle_timeout_secs,
             f.style,
+            f.api_key,
         )
         .unwrap();
         assert_eq!(c.base_url, "http://127.0.0.1:8002/v1");
         assert_eq!(c.model, "hemmingway-1");
         assert_eq!(c.style, "none");
+        assert_eq!(c.api_key, None);
     }
 }

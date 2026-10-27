@@ -90,12 +90,24 @@ memory), never here.
   per owner decision (no XDG redirection, no Library path).
 - `--config` names a file that must exist; the default path may be absent.
 - Env vars: `GHOSTWRITER_BASE_URL`, `GHOSTWRITER_MODEL`,
-  `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`,
+  `GHOSTWRITER_API_KEY`, `GHOSTWRITER_TEMPERATURE`, `GHOSTWRITER_TIMEOUT_SECS`,
   `GHOSTWRITER_IDLE_TIMEOUT_SECS`, `GHOSTWRITER_STYLE` (a registered id,
   case-insensitive). `GHOSTWRITER_STE` is retired and refused at startup.
   There are no legacy `HEMMINGWAY_*` aliases. `timeout_secs` and
   `idle_timeout_secs` (file or env) above 86,400 (one day) are refused at
   startup, and the error names the cap.
+- `api_key` (string, unset by default) is the bearer token for an
+  authenticated endpoint. Unset or blank means no `Authorization` header at
+  all — the unauthenticated loopback fleet engines are unaffected. When set,
+  every request, health probes included, carries
+  `Authorization: Bearer <api_key>` (one default-header set on both HTTP
+  clients, never a per-call special case). The value is trimmed; one that
+  cannot travel in an HTTP header is refused at startup; one beginning with
+  `!` is refused with the repair named, because ghostwriter runs no commands
+  from configuration (the client's `!command` env indirection must be
+  resolved before launch). The token never enters an error message, a tool
+  result, or `--self-check` output, which reports only `api_key_set`;
+  `Config`'s hand-written `Debug` prints `<set>` in its place.
 - `style` (string, default `"none"`) is the server-side default for the
   per-call `style` argument on the four model tools, validated against the
   registry at startup: with `style = "ste"`, calls that omit the argument

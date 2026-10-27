@@ -50,6 +50,7 @@ fn self_check_names_the_loopback_default_and_no_internal_host() {
     });
     assert_eq!(json["base_url"], "http://127.0.0.1:8002/v1", "{text}");
     assert_eq!(json["model"], "hemmingway-1", "{text}");
+    assert_eq!(json["api_key_set"], false, "{text}");
     assert!(!text.contains("hyper03"), "internal host leaked: {text}");
     let _ = std::fs::remove_dir_all(&home);
 }

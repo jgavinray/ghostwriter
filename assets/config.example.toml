@@ -8,7 +8,7 @@
 #
 # Resolution order: built-in defaults < this file < GHOSTWRITER_*
 # environment variables (GHOSTWRITER_BASE_URL, GHOSTWRITER_MODEL,
-# GHOSTWRITER_TEMPERATURE, GHOSTWRITER_TIMEOUT_SECS,
+# GHOSTWRITER_API_KEY, GHOSTWRITER_TEMPERATURE, GHOSTWRITER_TIMEOUT_SECS,
 # GHOSTWRITER_IDLE_TIMEOUT_SECS, GHOSTWRITER_STYLE).
 #
 # Verify what a given configuration resolves to without starting the
@@ -23,6 +23,19 @@ base_url = "http://127.0.0.1:8002/v1"
 
 # Served model id on that endpoint.
 model = "hemmingway-1"
+
+# Bearer token, for an endpoint that requires authentication. Unset (or
+# empty) sends no Authorization header at all — the loopback fleet
+# engines accept unauthenticated requests, so this stays off by default.
+# When set, EVERY request carries `Authorization: Bearer <api_key>`,
+# health probes included. GHOSTWRITER_API_KEY overrides this key.
+#
+# ghostwriter runs no commands from configuration: a client-side
+# `!command` env indirection (e.g. `"!cat ~/.token"`) must be resolved by
+# the MCP client or a wrapper script before the server starts, and a value
+# beginning with `!` is refused at startup.
+#
+# api_key = ""
 
 # Sampling temperature; clamped to 0.0..2.0.
 temperature = 0.3
